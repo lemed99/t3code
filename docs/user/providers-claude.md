@@ -6,42 +6,26 @@ shared provider settings.
 
 ## Separate accounts or configurations
 
-Use a separate Claude config directory for each account. This also works for named
-presets that need different Claude settings or a router connection.
+Each Claude account uses its own Claude config directory. Keep your existing
+account on the default instance, then add one instance per extra account in
+**Settings > Providers**. Leave **CLAUDE_CONFIG_DIR path** empty and the new
+account gets its own folder, `~/.claude-<instance id>`. After you add it, sign in
+from the terminal that opens in the dialog; you can also sign in or out later from
+the instance's settings.
 
-Keep your existing account in the default directory. On the environment's machine,
-create the second login:
+The config directory sets `CLAUDE_CONFIG_DIR`, leaving `HOME` and the system
+keychain location intact. Setting `HOME` instead can put credentials where this
+provider will not find them. Check the account reported in provider settings after
+signing in.
 
-```bash
-mkdir -p ~/.claude_personal
-CLAUDE_CONFIG_DIR=~/.claude_personal claude auth login
-```
+**Share conversation history** is on by default for extra accounts. Their
+conversations live with the default account's, so a thread moved to another
+account resumes natively. Logins stay separate. An account folder that already has
+its own history keeps it. With sharing off, a thread moved to another account
+receives the conversation as handed-off context, trimmed to fit.
 
-Add another Claude instance in **Settings > Providers**:
-
-| Instance        | Binary path | CLAUDE_CONFIG_DIR path |
-| --------------- | ----------- | ---------------------- |
-| Claude Work     | `claude`    | Leave empty            |
-| Claude Personal | `claude`    | `~/.claude_personal`   |
-
-An empty config-directory setting uses Claude Code's normal configuration. The
-custom setting changes `CLAUDE_CONFIG_DIR`, leaving `HOME` and the system keychain
-location intact. Use the same variable for the login command. Setting `HOME`
-instead can put credentials where this provider will not find them.
-
-Check the account reported in provider settings after signing in. Separate
-account directories stay isolated, including their local conversation state, so
-a thread moved to another account receives the conversation as handed-off
-context, trimmed to fit, rather than resuming it.
-To let accounts resume each other's conversations natively, point each extra
-directory's `projects` folder at the default one before you start using it:
-
-```bash
-rm -rf ~/.claude_personal/projects
-ln -s ~/.claude/projects ~/.claude_personal/projects
-```
-
-Logins stay separate; only conversation history is shared.
+Named presets that need different Claude settings or a router connection also use
+their own config directory.
 
 For presets that differ only in API keys or endpoints, use the instance's
 **Environment variables**. Variable assignments do not belong in **Launch arguments**.

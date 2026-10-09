@@ -124,3 +124,17 @@ export function resolveAcpRegistryWizardNavigation(
     prerequisite: { step: 0, error: validation.selectionError },
   });
 }
+
+export const CLAUDE_DRIVER_KIND = "claudeAgent";
+
+/**
+ * Another Claude account gets its own config directory unless the user named
+ * one, so signing it in never replaces the default account's login.
+ */
+export function withOwnClaudeConfigDir(
+  config: Record<string, unknown>,
+  instanceId: string,
+): Record<string, unknown> {
+  const homePath = typeof config.homePath === "string" ? config.homePath.trim() : "";
+  return homePath.length > 0 ? config : { ...config, homePath: `~/.claude-${instanceId}` };
+}

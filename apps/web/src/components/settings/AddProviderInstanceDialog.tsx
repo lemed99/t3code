@@ -45,6 +45,8 @@ import {
   resolveAcpRegistryWizardNavigation,
   resolveWizardNavigation,
   updateProviderIdentityDraft,
+  withOwnClaudeConfigDir,
+  CLAUDE_DRIVER_KIND,
   type ProviderIdentityDraft,
   type WizardNavigation,
 } from "./AddProviderInstanceDialog.logic";
@@ -304,7 +306,9 @@ export function AddProviderInstanceDialog({
     const config =
       driver === "codex"
         ? { ...configByDriver[driver], setupMode: "existing" }
-        : (configByDriver[driver] ?? {});
+        : driver === CLAUDE_DRIVER_KIND
+          ? withOwnClaudeConfigDir(configByDriver[driver] ?? {}, instanceId)
+          : (configByDriver[driver] ?? {});
     const hasConfig = Object.keys(config).length > 0;
     const normalizedAccentColor = normalizeProviderAccentColor(accentColor);
 
@@ -334,7 +338,7 @@ export function AddProviderInstanceDialog({
       return;
     }
     onCreated?.(brandedId);
-    if (isAcpRegistry && !isLocalAcp) {
+    if ((isAcpRegistry && !isLocalAcp) || driver === CLAUDE_DRIVER_KIND) {
       setCreatedInstanceId(brandedId);
       setIsSaving(false);
       setWizardStep(2);
@@ -380,7 +384,7 @@ export function AddProviderInstanceDialog({
               currentStep={wizardStep}
               summaries={wizardStepSummaries}
               instanceIdError={instanceIdError}
-              disabled={isSaving || isPreparingRegistryAgent}
+              disabled={isSaving || isPreparingRegistryAgent || createdInstanceId !== null}
               onNavigation={applyWizardNavigation}
             />
           )}

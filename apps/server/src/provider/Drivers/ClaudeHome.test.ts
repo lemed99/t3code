@@ -12,6 +12,7 @@ import {
   makeClaudeContinuationGroupKey,
   makeClaudeEnvironment,
   resolveClaudeHomePath,
+  shareClaudeHistory,
 } from "./ClaudeHome.ts";
 
 it.layer(NodeServices.layer)("ClaudeHome", (it) => {
@@ -149,6 +150,55 @@ it.layer(NodeServices.layer)("ClaudeHome", (it) => {
         const first = yield* makeClaudeCapabilitiesCacheKey(config, "/repo-a");
         const second = yield* makeClaudeCapabilitiesCacheKey(config, "/repo-b");
         expect(first).not.toBe(second);
+      }),
+    );
+  });
+
+  describe("shared conversation history", () => {
+    const makeHomes = Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped();
+      return { fileSystem, path, root, defaultHome: path.join(root, ".claude") };
+    });
+
+    it.effect("links a new account's projects to the default account's history", () =>
+      Effect.gen(function* () {
+        const { fileSystem, path, root, defaultHome } = yield* makeHomes;
+        const account = path.join(root, ".claude-team1");
+
+        expect(yield* shareClaudeHistory(account, defaultHome)).toBe(true);
+        expect(yield* fileSystem.realPath(path.join(account, "projects"))).toBe(
+          yield* fileSystem.realPath(path.join(defaultHome, "projects")),
+        );
+        // Running again is a no-op, and accounts then share a continuation group.
+        expect(yield* shareClaudeHistory(account, defaultHome)).toBe(true);
+        expect(yield* makeClaudeContinuationGroupKey({ homePath: account })).toBe(
+          yield* makeClaudeContinuationGroupKey({ homePath: defaultHome }),
+        );
+      }),
+    );
+
+    it.effect("replaces an empty projects folder but never one with history", () =>
+      Effect.gen(function* () {
+        const { fileSystem, path, root, defaultHome } = yield* makeHomes;
+        const empty = path.join(root, ".claude-empty");
+        const used = path.join(root, ".claude-used");
+        yield* fileSystem.makeDirectory(path.join(empty, "projects"), { recursive: true });
+        yield* fileSystem.makeDirectory(path.join(used, "projects", "-repo"), { recursive: true });
+
+        expect(yield* shareClaudeHistory(empty, defaultHome)).toBe(true);
+        expect(yield* shareClaudeHistory(used, defaultHome)).toBe(false);
+        expect(yield* fileSystem.readDirectory(path.join(used, "projects"))).toEqual(["-repo"]);
+      }),
+    );
+
+    it.effect("leaves the default account itself alone", () =>
+      Effect.gen(function* () {
+        const { fileSystem, path, defaultHome } = yield* makeHomes;
+
+        expect(yield* shareClaudeHistory(defaultHome, defaultHome)).toBe(true);
+        expect(yield* fileSystem.exists(path.join(defaultHome, "projects"))).toBe(false);
       }),
     );
   });

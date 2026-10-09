@@ -80,6 +80,42 @@ export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationG
   },
 );
 
+/**
+ * Point an account's `projects` folder at the default `~/.claude/projects`, so
+ * every account that shares it resumes the same conversations. Creates the
+ * folders it needs and links only a missing or empty `projects`: existing
+ * history is never moved or deleted. Succeeds with whether the store is shared.
+ */
+export const shareClaudeHistory = Effect.fn("shareClaudeHistory")(function* (
+  configDir: string,
+  defaultConfigDir: string = NodeOS.homedir() + "/.claude",
+): Effect.fn.Return<boolean, never, FileSystem.FileSystem | Path.Path> {
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const sharedProjects = path.join(path.resolve(defaultConfigDir), "projects");
+  const ownProjects = path.join(path.resolve(configDir), "projects");
+  if (ownProjects === sharedProjects) return true;
+  return yield* Effect.gen(function* () {
+    yield* fileSystem.makeDirectory(sharedProjects, { recursive: true });
+    yield* fileSystem.makeDirectory(path.dirname(ownProjects), { recursive: true });
+    const realShared = yield* fileSystem.realPath(sharedProjects);
+    if (yield* fileSystem.exists(ownProjects)) {
+      if ((yield* fileSystem.realPath(ownProjects)) === realShared) return true;
+      const info = yield* fileSystem.stat(ownProjects);
+      if (info.type !== "Directory" || (yield* fileSystem.readDirectory(ownProjects)).length > 0) {
+        return false;
+      }
+      yield* fileSystem.remove(ownProjects, { recursive: true });
+    }
+    yield* fileSystem.symlink(sharedProjects, ownProjects);
+    return true;
+  }).pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("claude.share_history.failed", { configDir, cause }).pipe(Effect.as(false)),
+    ),
+  );
+});
+
 export const makeClaudeCapabilitiesCacheKey = Effect.fn("makeClaudeCapabilitiesCacheKey")(
   function* (
     config: Pick<ClaudeSettings, "binaryPath" | "homePath">,

@@ -1,4 +1,4 @@
-import { ClaudeSettings, ProviderDriverKind } from "@t3tools/contracts";
+import { ClaudeSettings, ProviderDriverKind, ProviderSetupError } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
 import * as Duration from "effect/Duration";
 import * as Crypto from "effect/Crypto";
@@ -29,7 +29,9 @@ import {
   makePendingClaudeProvider,
   probeClaudeCapabilities,
   probeClaudeWorkspaceSnapshot,
+  runClaudeCommand,
 } from "../ClaudeProvider.ts";
+import { makeClaudeAuth } from "./ClaudeAuth.ts";
 import { makeManagedServerProvider } from "@t3tools/provider-core/server/managedProvider";
 import * as ModelCatalog from "@t3tools/provider-core/server/ModelCatalog";
 import { resolveClaudeModelCatalog } from "../ClaudeModelCatalog.ts";
@@ -55,7 +57,9 @@ import {
 import {
   makeClaudeCapabilitiesCacheKey,
   makeClaudeContinuationGroupKey,
+  makeClaudeEnvironment,
   resolveClaudeHomePath,
+  shareClaudeHistory,
 } from "./ClaudeHome.ts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 const decodeClaudeSettings = Schema.decodeSync(ClaudeSettings);
@@ -139,23 +143,43 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           Effect.provideService(Path.Path, path),
         ),
       );
+      const configDir = yield* resolveClaudeHomePath(effectiveConfig, processEnv);
+      // An extra account reads the default account's conversations, so a
+      // thread can move between accounts and resume natively.
+      if (effectiveConfig.shareHistory && effectiveConfig.homePath.trim().length > 0) {
+        yield* shareClaudeHistory(configDir).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+        );
+      }
       const continuationGroupKey = yield* makeClaudeContinuationGroupKey(
         effectiveConfig,
         processEnv,
       );
-      const configDir = yield* resolveClaudeHomePath(effectiveConfig, processEnv);
       const accountConfigPath = yield* ClaudeResetCredits.claudeAccountConfigPath(
         effectiveConfig.homePath.trim() || processEnv.CLAUDE_CONFIG_DIR?.trim()
           ? configDir
           : undefined,
       );
-      const stampIdentity = withInstanceIdentity({
+      const stampInstanceIdentity = withInstanceIdentity({
         instanceId,
         driverKind: DRIVER_KIND,
         displayName,
         accentColor,
         continuationGroupKey,
       });
+      // Claude signs in from Settings with `claude auth login` in this
+      // instance's config directory.
+      const stampIdentity: typeof stampInstanceIdentity = (draft) =>
+        stampInstanceIdentity({
+          ...draft,
+          setup: {
+            ...draft.setup,
+            canAuthenticate: true,
+            canInstall: draft.setup?.canInstall ?? false,
+          },
+          auth: { ...draft.auth, canLogout: draft.auth.status === "authenticated" },
+        });
 
       const scopedLimitNames = yield* makeClaudeScopedLimitNames;
       const orchestrationAdapter = yield* createClaudeAdapterV2(
@@ -330,9 +354,47 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           ),
         );
 
+      const auth = yield* makeClaudeAuth({
+        instanceId,
+        binaryPath: effectiveConfig.binaryPath,
+        environment: yield* makeClaudeEnvironment(effectiveConfig, processEnv).pipe(
+          Effect.provideService(Path.Path, path),
+        ),
+        configDir,
+        cwd,
+        logout: runClaudeCommand(effectiveConfig, ["auth", "logout"], processEnv).pipe(
+          Effect.provideService(FileSystem.FileSystem, fileSystem),
+          Effect.provideService(Path.Path, path),
+          Effect.mapError(
+            () =>
+              new ProviderSetupError({
+                instanceId,
+                operation: "logout",
+                detail: "Claude could not sign out.",
+              }),
+          ),
+        ),
+        onChanged: (signedIn) =>
+          Cache.invalidateAll(capabilitiesProbeCache).pipe(
+            Effect.andThen(snapshot.refresh),
+            Effect.flatMap((provider) =>
+              !signedIn || provider.auth.status === "authenticated"
+                ? Effect.void
+                : Effect.fail(
+                    new ProviderSetupError({
+                      instanceId,
+                      operation: "start",
+                      detail: provider.message ?? "Could not verify the Claude sign-in. Try again.",
+                    }),
+                  ),
+            ),
+          ),
+      });
+
       return {
         instanceId,
         driverKind: DRIVER_KIND,
+        auth,
         continuationIdentity: {
           ...fallbackContinuationIdentity,
           continuationKey: continuationGroupKey,

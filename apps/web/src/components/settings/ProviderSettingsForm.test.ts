@@ -115,9 +115,14 @@ describe("ProviderSettingsForm helpers", () => {
     expect(deriveProviderSettingsFields(claude!).map((field) => field.key)).toEqual([
       "binaryPath",
       "homePath",
+      "shareHistory",
       "autoCompactWindow",
       "launchArgs",
     ]);
+    const shareHistory = deriveProviderSettingsFields(claude!).find(
+      (field) => field.key === "shareHistory",
+    );
+    expect(shareHistory).toMatchObject({ control: "switch", defaultBooleanValue: true });
   });
 
   it("preserves unknown config keys while omitting empty configurable fields", () => {

@@ -630,8 +630,17 @@ export const ClaudeSettings = makeProviderSettingsSchema(
       Schema.annotateKey({
         title: "CLAUDE_CONFIG_DIR path",
         description:
-          "Custom Claude home and config directory. Keeps .claude.json and .claude separate.",
+          "Where this account's login and settings live. A new account added here gets its own folder when left empty.",
         providerSettingsForm: { placeholder: "~/.claude", clearWhenEmpty: "omit" },
+      }),
+    ),
+    shareHistory: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({
+        title: "Share conversation history",
+        description:
+          "Use the default Claude account's conversation history, so threads move between accounts without losing context. Sign-ins stay separate.",
+        providerSettingsForm: { control: "switch" },
       }),
     ),
     customModels: Schema.Array(CustomModelSetting).pipe(
@@ -665,7 +674,7 @@ export const ClaudeSettings = makeProviderSettingsSchema(
     ),
   },
   {
-    order: ["binaryPath", "homePath", "autoCompactWindow", "launchArgs"],
+    order: ["binaryPath", "homePath", "shareHistory", "autoCompactWindow", "launchArgs"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;

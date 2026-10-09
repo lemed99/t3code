@@ -7,6 +7,7 @@ import {
   resolveAcpRegistryWizardNavigation,
   resolveWizardNavigation,
   updateProviderIdentityDraft,
+  withOwnClaudeConfigDir,
 } from "./AddProviderInstanceDialog.logic";
 
 describe("resolveWizardNavigation", () => {
@@ -112,6 +113,24 @@ describe("ACP Registry wizard", () => {
     expect(getProviderIdentityDraft(drafts, "acpRegistry")).toMatchObject({
       label: "Gemini CLI",
       instanceIdOverride: "acpRegistry_gemini_cli",
+    });
+  });
+});
+
+describe("withOwnClaudeConfigDir", () => {
+  it("gives a new Claude account its own config folder", () => {
+    expect(withOwnClaudeConfigDir({}, "claude_team1")).toEqual({
+      homePath: "~/.claude-claude_team1",
+    });
+    expect(withOwnClaudeConfigDir({ homePath: "  ", launchArgs: "--x" }, "work")).toEqual({
+      homePath: "~/.claude-work",
+      launchArgs: "--x",
+    });
+  });
+
+  it("keeps a folder the user chose", () => {
+    expect(withOwnClaudeConfigDir({ homePath: "~/.claude" }, "work")).toEqual({
+      homePath: "~/.claude",
     });
   });
 });
