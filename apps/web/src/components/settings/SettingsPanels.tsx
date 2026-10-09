@@ -582,6 +582,10 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.autoResumeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads
       ? ["Auto-resume limited threads"]
       : []),
+    ...(settings.autoSwitchAccountOnUsageLimit !==
+    DEFAULT_UNIFIED_SETTINGS.autoSwitchAccountOnUsageLimit
+      ? ["Switch accounts on usage limit"]
+      : []),
     ...(settings.snoozeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads
       ? ["Snooze limited threads"]
       : []),
@@ -741,6 +745,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarAutoSettleKeepPullRequests: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleKeepPullRequests,
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
       autoResumeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
+      autoSwitchAccountOnUsageLimit: DEFAULT_UNIFIED_SETTINGS.autoSwitchAccountOnUsageLimit,
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
@@ -2219,6 +2224,22 @@ export function GeneralSettingsPanel() {
                 updateSettings({ autoResumeLimitedThreads: Boolean(checked) })
               }
               aria-label="Auto-resume limited threads"
+            />
+          }
+        />
+        <SettingsRow
+          serverScoped
+          {...searchableSetting("auto-switch-account-on-usage-limit")}
+          description="When a thread stops on a usage limit, continue it on another account of the same provider that still has usage left."
+          settingKeys={["autoSwitchAccountOnUsageLimit"]}
+          control={
+            <ScopedSwitch
+              settingKeys={["autoSwitchAccountOnUsageLimit"]}
+              checked={settings.autoSwitchAccountOnUsageLimit}
+              onCheckedChange={(checked) =>
+                updateSettings({ autoSwitchAccountOnUsageLimit: Boolean(checked) })
+              }
+              aria-label="Switch accounts on usage limit"
             />
           }
         />

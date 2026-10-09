@@ -39,6 +39,7 @@ import type {
   RunAttemptId,
 } from "@t3tools/contracts";
 import {
+  ProviderInstanceId,
   OrchestrationV2AppThreadJson as OrchestrationV2AppThreadJsonSchema,
   OrchestrationV2CheckpointJson as OrchestrationV2CheckpointJsonSchema,
   OrchestrationV2CheckpointScopeJson as OrchestrationV2CheckpointScopeJsonSchema,
@@ -168,6 +169,33 @@ export type ProjectionLimitRecoveryCandidate = Pick<
   | "limitRecovery"
   | "snoozedUntil"
 >;
+
+/** A thread whose latest run stopped on a usage limit, as account switching reads it. */
+export interface ProjectionAccountSwitchCandidate {
+  readonly id: ThreadId;
+  readonly latestRunId: RunId;
+  readonly latestRunCompletedAt: DateTime.Utc | null;
+  /** The account the limited run ran on. */
+  readonly runProviderInstanceId: ProviderInstanceId;
+  readonly modelSelection: OrchestrationV2ThreadShell["modelSelection"];
+  readonly usageLimitResetAt: string | null;
+  readonly hasHeldQueuedRuns: boolean;
+}
+
+/**
+ * A thread whose active run is paused by its provider on a rejected usage
+ * window: its latest output is a usage-limit notice. Claude holds such a turn
+ * open until the window reopens.
+ */
+export interface ProjectionHeldUsageLimitRun {
+  readonly id: ThreadId;
+  readonly runId: RunId;
+  readonly runProviderInstanceId: ProviderInstanceId;
+  readonly modelSelection: OrchestrationV2ThreadShell["modelSelection"];
+}
+
+/** Provider notices for a rejected usage window use this native item id prefix. */
+export const USAGE_LIMIT_NOTICE_NATIVE_ID_PREFIX = "usage-limit:";
 
 export type ProjectionThreadPullRequests = Pick<
   OrchestrationV2AppThread,
@@ -416,6 +444,16 @@ export interface ProjectionStoreV2Shape {
     readonly autoResume: boolean;
     readonly snooze: boolean;
   }) => Effect.Effect<ReadonlyArray<ProjectionLimitRecoveryCandidate>, ProjectionStoreV2Error>;
+  /** Active runs that announced a rejected usage window and have not ended. */
+  readonly getHeldUsageLimitRuns: () => Effect.Effect<
+    ReadonlyArray<ProjectionHeldUsageLimitRun>,
+    ProjectionStoreV2Error
+  >;
+  /** Active threads whose latest executed run stopped on a usage limit. */
+  readonly getAccountSwitchCandidates: () => Effect.Effect<
+    ReadonlyArray<ProjectionAccountSwitchCandidate>,
+    ProjectionStoreV2Error
+  >;
   readonly getSettlementCandidates: (
     threadId?: ThreadId,
   ) => Effect.Effect<ReadonlyArray<ProjectionSettlementCandidate>, ProjectionStoreV2Error>;
@@ -3643,6 +3681,141 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
 
+    const getAccountSwitchCandidates = Effect.fn("ProjectionStore.getAccountSwitchCandidates")(
+      function* () {
+        // Same latest-run and root-error lookups as limit recovery, without the
+        // reset-time and recovery-choice filters: a switch does not wait.
+        const rows = yield* sql<{
+          readonly payload_json: string;
+          readonly run_id: string;
+          readonly completed_at: string | null;
+          readonly run_provider_instance_id: string;
+          readonly failure_payload_json: string;
+          readonly last_error: string | null;
+          readonly has_held_queue: number;
+        }>`
+          SELECT t.payload_json, r.run_id, r.completed_at,
+            json_extract(r.payload_json, '$.providerInstanceId') AS run_provider_instance_id,
+            item.payload_json AS failure_payload_json,
+            (
+              SELECT json_extract(session.payload_json, '$.lastError')
+              FROM orchestration_v2_projection_provider_sessions session
+              INNER JOIN orchestration_v2_projection_provider_session_bindings binding
+                ON binding.provider_session_id = session.provider_session_id
+              WHERE binding.thread_id = t.thread_id
+                AND session.provider_instance_id = t.provider_instance_id
+              ORDER BY session.updated_at DESC, session.provider_session_id DESC
+              LIMIT 1
+            ) AS last_error,
+            EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runs held
+              WHERE held.thread_id = t.thread_id AND held.status = 'queued'
+                AND json_extract(held.payload_json, '$.queueHeld') = 1
+            ) AS has_held_queue
+          FROM orchestration_v2_projection_threads t
+          INNER JOIN orchestration_v2_projection_runs r ON r.run_id = (
+            SELECT latest.run_id FROM orchestration_v2_projection_runs latest
+            WHERE latest.thread_id = t.thread_id
+              AND latest.status <> 'queued'
+              AND NOT (
+                latest.status = 'cancelled'
+                AND json_extract(latest.payload_json, '$.startedAt') IS NULL
+              )
+            -- latestExecutedRun: the run that ended last (runRanAfter).
+            ORDER BY latest.completed_at IS NULL DESC, latest.completed_at DESC,
+              latest.ordinal DESC, latest.run_id DESC
+            LIMIT 1
+          ) AND r.status = 'failed'
+          INNER JOIN orchestration_v2_projection_turn_items item ON item.turn_item_id = (
+            SELECT error.turn_item_id FROM orchestration_v2_projection_turn_items error
+            WHERE error.thread_id = t.thread_id AND error.run_id = r.run_id
+              AND error.type = 'error' AND error.status = 'failed'
+              AND error.node_id IS json_extract(r.payload_json, '$.rootNodeId')
+            ORDER BY error.updated_at DESC, error.ordinal DESC, error.turn_item_id DESC
+            LIMIT 1
+          )
+          WHERE t.deleted_at IS NULL
+            AND json_extract(t.payload_json, '$.archivedAt') IS NULL
+            AND json_extract(t.payload_json, '$.settledOverride') IS NOT 'settled'
+            AND json_extract(item.payload_json, '$.failure.class') = 'usage_limit'
+            AND NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runtime_requests request
+              WHERE request.thread_id = t.thread_id AND request.status = 'pending'
+            )
+          ORDER BY t.thread_id
+        `;
+        const candidates: Array<ProjectionAccountSwitchCandidate> = [];
+        for (const row of rows) {
+          const thread = yield* decodeThreadPayload(row.payload_json);
+          const item = yield* decodeTurnItemPayload(row.failure_payload_json);
+          const summary = threadErrorSummary(
+            item.type === "error" ? item.failure : null,
+            row.last_error,
+          );
+          if (summary.lastErrorClass !== "usage_limit") continue;
+          candidates.push({
+            id: thread.id,
+            latestRunId: RunId.make(row.run_id),
+            latestRunCompletedAt:
+              row.completed_at === null ? null : DateTime.makeUnsafe(row.completed_at),
+            runProviderInstanceId: ProviderInstanceId.make(row.run_provider_instance_id),
+            modelSelection: thread.modelSelection,
+            usageLimitResetAt: summary.usageLimitResetAt,
+            hasHeldQueuedRuns: row.has_held_queue === 1,
+          });
+        }
+        return candidates;
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
+    const getHeldUsageLimitRuns = Effect.fn("ProjectionStore.getHeldUsageLimitRuns")(
+      function* () {
+        const rows = yield* sql<{
+          readonly payload_json: string;
+          readonly run_id: string;
+          readonly run_provider_instance_id: string;
+        }>`
+          SELECT t.payload_json, r.run_id,
+            json_extract(r.payload_json, '$.providerInstanceId') AS run_provider_instance_id
+          FROM orchestration_v2_projection_runs r
+          INNER JOIN orchestration_v2_projection_threads t ON t.thread_id = r.thread_id
+          WHERE r.status = 'running'
+            AND t.deleted_at IS NULL
+            AND json_extract(t.payload_json, '$.archivedAt') IS NULL
+            AND EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_turn_items notice
+              WHERE notice.run_id = r.run_id AND notice.type = 'system_notice'
+                AND json_extract(notice.payload_json, '$.nativeItemRef.nativeId')
+                  LIKE ${`${USAGE_LIMIT_NOTICE_NATIVE_ID_PREFIX}%`}
+                -- A run that produced anything after the notice has resumed.
+                AND NOT EXISTS (
+                  SELECT 1 FROM orchestration_v2_projection_turn_items later
+                  WHERE later.run_id = r.run_id AND later.type <> 'system_notice'
+                    AND later.updated_at > notice.updated_at
+                )
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM orchestration_v2_projection_runtime_requests request
+              WHERE request.thread_id = t.thread_id AND request.status = 'pending'
+            )
+          ORDER BY t.thread_id
+        `;
+        const held: Array<ProjectionHeldUsageLimitRun> = [];
+        for (const row of rows) {
+          const thread = yield* decodeThreadPayload(row.payload_json);
+          held.push({
+            id: thread.id,
+            runId: RunId.make(row.run_id),
+            runProviderInstanceId: ProviderInstanceId.make(row.run_provider_instance_id),
+            modelSelection: thread.modelSelection,
+          });
+        }
+        return held;
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
     const getRecoveryThreadIds = Effect.fn("ProjectionStore.getRecoveryThreadIds")(
       function* (kind: ProjectionRecoveryKind) {
         const candidates = (() => {
@@ -6092,6 +6265,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getPlan,
       getProviderControlContext,
       getLimitRecoveryCandidates,
+      getAccountSwitchCandidates,
+      getHeldUsageLimitRuns,
       getRecoveryThreadIds,
       getUnreadableThreadIds,
       getThreadSnapshot,
@@ -6298,6 +6473,82 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
                     DateTime.toEpochMillis(thread.snoozedUntil) <= nowMs)
                 );
               })
+              .toSorted((left, right) => left.id.localeCompare(right.id)),
+          ),
+        ),
+      getAccountSwitchCandidates: () =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()]
+              .filter(
+                ({ thread }) =>
+                  thread.deletedAt === null &&
+                  thread.archivedAt === null &&
+                  thread.settledOverride !== "settled",
+              )
+              .flatMap((projection): Array<ProjectionAccountSwitchCandidate> => {
+                const shell = threadShellFromProjection(projection);
+                const run = projection.runs.find((candidate) => candidate.id === shell.latestRunId);
+                if (
+                  run === undefined ||
+                  shell.status !== "failed" ||
+                  shell.lastErrorClass !== "usage_limit" ||
+                  shell.pendingRuntimeRequest !== null
+                )
+                  return [];
+                return [
+                  {
+                    id: shell.id,
+                    latestRunId: run.id,
+                    latestRunCompletedAt: run.completedAt ?? null,
+                    runProviderInstanceId: run.providerInstanceId,
+                    modelSelection: shell.modelSelection,
+                    usageLimitResetAt: shell.usageLimitResetAt ?? null,
+                    hasHeldQueuedRuns: projection.runs.some(
+                      (candidate) => candidate.status === "queued" && candidate.queueHeld === true,
+                    ),
+                  },
+                ];
+              })
+              .toSorted((left, right) => left.id.localeCompare(right.id)),
+          ),
+        ),
+      getHeldUsageLimitRuns: () =>
+        Ref.get(replayState).pipe(
+          Effect.map((state) =>
+            [...state.projections.values()]
+              .filter(
+                (projection) =>
+                  projection.thread.deletedAt === null &&
+                  projection.thread.archivedAt === null &&
+                  !projection.runtimeRequests.some((request) => request.status === "pending"),
+              )
+              .flatMap((projection) =>
+                projection.runs
+                  .filter((run) => {
+                    if (run.status !== "running") return false;
+                    const items = projection.turnItems.filter((item) => item.runId === run.id);
+                    return items.some(
+                      (notice) =>
+                        notice.type === "system_notice" &&
+                        notice.nativeItemRef?.nativeId?.startsWith(
+                          USAGE_LIMIT_NOTICE_NATIVE_ID_PREFIX,
+                        ) === true &&
+                        !items.some(
+                          (later) =>
+                            later.type !== "system_notice" &&
+                            DateTime.toEpochMillis(later.updatedAt) >
+                              DateTime.toEpochMillis(notice.updatedAt),
+                        ),
+                    );
+                  })
+                  .map((run): ProjectionHeldUsageLimitRun => ({
+                    id: projection.thread.id,
+                    runId: run.id,
+                    runProviderInstanceId: run.providerInstanceId,
+                    modelSelection: projection.thread.modelSelection,
+                  })),
+              )
               .toSorted((left, right) => left.id.localeCompare(right.id)),
           ),
         ),

@@ -92,6 +92,7 @@ function AutoSettleSettingsRows() {
   const writeToAll = (
     patch: Partial<AutoSettleSettings> & {
       autoResumeLimitedThreads?: boolean;
+      autoSwitchAccountOnUsageLimit?: boolean;
       snoozeLimitedThreads?: boolean;
     },
   ) => {
@@ -194,6 +195,13 @@ function AutoSettleSettingsRows() {
             value={uniformMobileSetting(displayTargets, "autoResumeLimitedThreads")}
             disabled={disabled}
             onValueChange={(value) => writeToAll({ autoResumeLimitedThreads: value })}
+          />
+          <SettingsSwitchRow
+            icon="clock"
+            label="Switch accounts on usage limit"
+            value={uniformMobileSetting(displayTargets, "autoSwitchAccountOnUsageLimit")}
+            disabled={disabled}
+            onValueChange={(value) => writeToAll({ autoSwitchAccountOnUsageLimit: value })}
           />
           <SettingsSwitchRow
             icon="clock"

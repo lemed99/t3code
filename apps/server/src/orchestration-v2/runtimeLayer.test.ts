@@ -1,4 +1,5 @@
 import { SourceControlProviderKind } from "@t3tools/contracts";
+import { accountSwitchCommands } from "./UsageLimitAccountSwitchWorker.ts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
@@ -5069,6 +5070,291 @@ it.layer(layerSharedApplicationDataPlaneTest)("shared application data plane", (
 });
 
 it.layer(layerTest)("usage-limit recovery", (it) => {
+  it.effect("finds a run paused on a usage limit and continues it on another account", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("account-switch-held");
+      const projectId = ProjectId.make("account-switch-held:project");
+      const now = yield* DateTime.now;
+      yield* seedProject({
+        projectId,
+        title: "Paused project",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: modelSelection,
+        createdAt: DateTime.formatIso(now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("account-switch-held:create"),
+        threadId,
+        projectId,
+        title: "Paused thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        commandId: CommandId.make("account-switch-held:start"),
+        threadId,
+        messageId: MessageId.make("account-switch-held:start"),
+        text: "Start work.",
+        attachments: [],
+        dispatchMode: { type: "defer_start" },
+        createdBy: "user",
+        creationSource: "web",
+      });
+      const [run] = (yield* orchestrator.getThreadProjection(threadId)).runs as [
+        OrchestrationV2Run,
+      ];
+      const notice = (nativeId: string) => ({
+        id: EventId.make(`account-switch-held:${nativeId}`),
+        type: "turn-item.updated" as const,
+        threadId,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make(`account-switch-held:${nativeId}`),
+          type: "system_notice" as const,
+          threadId,
+          runId: run.id,
+          nodeId: run.rootNodeId,
+          providerThreadId: null,
+          providerTurnId: null,
+          nativeItemRef: { driver, nativeId, strength: "weak" as const },
+          parentItemId: null,
+          ordinal: 2,
+          status: "completed" as const,
+          title: "Notice",
+          message: "Notice",
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+        },
+      });
+      yield* events.write({
+        events: [
+          {
+            id: EventId.make("account-switch-held:running"),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...run, status: "running", startedAt: now },
+          },
+          notice("compaction:1"),
+        ],
+      });
+      const held = () =>
+        projections
+          .getHeldUsageLimitRuns()
+          .pipe(Effect.map((runs) => runs.filter((candidate) => candidate.id === threadId)));
+      assert.lengthOf(yield* held(), 0);
+
+      yield* events.write({ events: [notice("usage-limit:turn:five_hour:1760000000")] });
+      assert.deepEqual(yield* held(), [
+        {
+          id: threadId,
+          runId: run.id,
+          runProviderInstanceId: modelSelection.instanceId,
+          modelSelection,
+        },
+      ]);
+      // Output after the notice means the window reopened and the run resumed.
+      const later = DateTime.add(now, { seconds: 1 });
+      yield* events.write({
+        events: [
+          {
+            id: EventId.make("account-switch-held:resumed"),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: later,
+            payload: {
+              id: TurnItemId.make("account-switch-held:resumed"),
+              type: "assistant_message",
+              threadId,
+              runId: run.id,
+              nodeId: run.rootNodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 3,
+              status: "completed",
+              title: "Assistant",
+              messageId: MessageId.make("account-switch-held:resumed"),
+              text: "Back at it.",
+              streaming: false,
+              startedAt: later,
+              completedAt: later,
+              updatedAt: later,
+            },
+          },
+        ],
+      });
+      assert.lengthOf(yield* held(), 0);
+
+      yield* events.write({
+        events: [
+          {
+            id: EventId.make("account-switch-held:interrupted"),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...run, status: "interrupted", startedAt: now, completedAt: now },
+          },
+        ],
+      });
+      assert.lengthOf(yield* held(), 0);
+      for (const command of accountSwitchCommands(
+        { threadId, runId: run.id, modelSelection, hasHeldQueuedRuns: false },
+        alternateInstanceId,
+      )) {
+        yield* orchestrator.dispatch(command);
+      }
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(after.thread.modelSelection.instanceId, alternateInstanceId);
+      assert.equal(after.runs.at(-1)?.providerInstanceId, alternateInstanceId);
+    }),
+  );
+
+  it.effect("continues a usage-limited thread on another account and releases its queue", () =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const events = yield* EventSink.EventSinkV2;
+      const projections = yield* ProjectionStore.ProjectionStoreV2;
+      const threadId = ThreadId.make("account-switch");
+      const projectId = ProjectId.make("account-switch:project");
+      const now = yield* DateTime.now;
+      yield* seedProject({
+        projectId,
+        title: "Account switch project",
+        workspaceRoot: process.cwd(),
+        defaultModelSelection: modelSelection,
+        createdAt: DateTime.formatIso(now),
+      });
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("account-switch:create"),
+        threadId,
+        projectId,
+        title: "Limited thread",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: null,
+        createdBy: "user",
+        creationSource: "web",
+      });
+      for (const [suffix, dispatchMode] of [
+        ["start", { type: "defer_start" }],
+        ["queue", { type: "queue_after_active" }],
+      ] as const) {
+        yield* orchestrator.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make(`account-switch:${suffix}`),
+          threadId,
+          messageId: MessageId.make(`account-switch:${suffix}`),
+          text: suffix === "start" ? "Start work." : "Follow up.",
+          attachments: [],
+          dispatchMode,
+          createdBy: "user",
+          creationSource: "web",
+        });
+      }
+      const [source, queued] = (yield* orchestrator.getThreadProjection(threadId)).runs as [
+        OrchestrationV2Run,
+        OrchestrationV2Run,
+      ];
+      const resetAt = DateTime.formatIso(DateTime.add(now, { hours: 2 }));
+      yield* events.write({
+        events: [
+          {
+            id: EventId.make("account-switch:hold"),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...queued, queueHeld: true },
+          },
+          {
+            id: EventId.make("account-switch:fail"),
+            type: "run.updated",
+            threadId,
+            occurredAt: now,
+            payload: { ...source, status: "failed", completedAt: now },
+          },
+          {
+            id: EventId.make("account-switch:error"),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: now,
+            payload: {
+              id: TurnItemId.make("account-switch:error"),
+              type: "error",
+              threadId,
+              runId: source.id,
+              nodeId: source.rootNodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 2,
+              status: "failed",
+              title: "Usage limit reached",
+              startedAt: now,
+              completedAt: now,
+              updatedAt: now,
+              failure: {
+                class: "usage_limit",
+                message: "Plan limit reached.",
+                code: "usageLimitExceeded",
+                retryable: null,
+                resetAt,
+              },
+            },
+          },
+        ],
+      });
+
+      const candidate = (yield* projections.getAccountSwitchCandidates()).find(
+        (thread) => thread.id === threadId,
+      );
+      assert.deepInclude(candidate, {
+        latestRunId: source.id,
+        runProviderInstanceId: modelSelection.instanceId,
+        usageLimitResetAt: resetAt,
+        hasHeldQueuedRuns: true,
+      });
+      const commands = accountSwitchCommands(
+        {
+          threadId,
+          runId: candidate!.latestRunId,
+          modelSelection: candidate!.modelSelection,
+          hasHeldQueuedRuns: candidate!.hasHeldQueuedRuns,
+        },
+        alternateInstanceId,
+      );
+      for (const command of commands) yield* orchestrator.dispatch(command);
+
+      const after = yield* orchestrator.getThreadProjection(threadId);
+      assert.equal(after.thread.modelSelection.instanceId, alternateInstanceId);
+      const continuation = after.runs.find((run) => run.id !== source.id && run.id !== queued.id);
+      assert.equal(continuation?.providerInstanceId, alternateInstanceId);
+      assert.notEqual(after.runs.find((run) => run.id === queued.id)?.queueHeld, true);
+      assert.isUndefined(
+        (yield* projections.getAccountSwitchCandidates()).find((thread) => thread.id === threadId),
+      );
+      // A repeated sweep replays the same command ids instead of adding runs.
+      for (const command of commands) yield* Effect.exit(orchestrator.dispatch(command));
+      assert.lengthOf((yield* orchestrator.getThreadProjection(threadId)).runs, after.runs.length);
+    }),
+  );
+
   it.effect.each(["interrupted", "usage_limit"] as const)(
     "manually resumes an %s run ahead of its queued message only once",
     (reason) =>

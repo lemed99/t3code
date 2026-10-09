@@ -6493,6 +6493,8 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
               const limitKey = `${limitType}:${rateLimitInfo.resetsAt ?? "unknown"}`;
               if (!context.announcedUsageLimits.has(limitKey)) {
                 context.announcedUsageLimits.add(limitKey);
+                // Account switching finds paused runs by this prefix
+                // (USAGE_LIMIT_NOTICE_NATIVE_ID_PREFIX in ProjectionStore).
                 const nativeItemId = `usage-limit:${context.providerTurnId}:${limitKey}`;
                 const notice = describeClaudeUsageLimit(
                   rateLimitInfo,

@@ -210,6 +210,8 @@ it.effect(
         ProjectionStore.ProjectionStoreV2.of({
           apply: () => Effect.void,
           getLimitRecoveryCandidates: () => Effect.die("unused getLimitRecoveryCandidates"),
+          getAccountSwitchCandidates: () => Effect.die("unused getAccountSwitchCandidates"),
+          getHeldUsageLimitRuns: () => Effect.die("unused getHeldUsageLimitRuns"),
           getShellSnapshot: () => Effect.die("unused getShellSnapshot"),
           readShellSnapshot: () => Effect.die("unused readShellSnapshot"),
           getThreadShell: () => Effect.die("unused getThreadShell"),

@@ -317,6 +317,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["usage quota rate limit reset recover continue"],
   },
   {
+    id: "auto-switch-account-on-usage-limit",
+    title: "Switch accounts on usage limit",
+    to: "/settings/general",
+    searchTerms: ["usage quota rate limit account subscription failover continue"],
+  },
+  {
     id: "working-shelf",
     title: "Working section (beta)",
     to: "/settings/general",
