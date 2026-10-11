@@ -8,6 +8,24 @@ Agents can place local images in a page by file path. T3 Code embeds them when t
 
 Before publishing, agents check their work with screenshots from a small headless browser that T3 Code keeps for itself; it never uses a browser you installed. The first preview on a machine downloads it once (about 120 MB) into T3 Code's data folder, so that preview can take a minute. Browser tabs on a remote environment use the same browser, so whichever comes first downloads it. Some Linux hosts need [setup](remote-access.md#browser-host-setup) before it can start. Pages publish without it.
 
+## Design canvas
+
+Ask an agent to design screens ("design the onboarding flow", "mock up the settings page") and it
+puts them on the project's design canvas. Open **Design canvas** from the right panel (**C** in an
+empty panel); after a turn that changed designs it opens on its own when proactive panels are on.
+Maximize the panel to give the canvas the whole window.
+
+Drag or scroll to move around, and pinch or hold ⌘/Ctrl while scrolling to zoom. **1** fits
+everything and **0** goes to 100%. Double-click a screen to click around in it, and press Esc to
+return to the canvas. The file button beside a screen's name opens its HTML in the file viewer.
+Projects with several pages of designs show a page menu at the top left.
+
+Designs live in the project, so every account and every provider working on it shares them: each
+screen is an HTML file in `design/screens/`, and `design/canvas.json` lists them in sections and
+pages with their sizes. A screen file that the list leaves out still appears, under **Not on the
+canvas yet**. The canvas reloads screens after the agent changes them; use the reload button after
+editing them some other way. The canvas is not available on mobile.
+
 ## MCP apps
 
 Some MCP servers return an interactive app with their tool results, following the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) standard. When an agent calls one of those tools, the app appears in the thread in place of the tool call, on web, desktop, and mobile. Codex supports this today, for any MCP server you have configured for it; other providers show these calls as ordinary tool calls.

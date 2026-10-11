@@ -1,0 +1,346 @@
+/**
+ * The design canvas shows a project's screens: self-contained HTML files under
+ * `design/`, listed in `design/canvas.json`. These helpers read that list and
+ * lay its frames out in canvas pixels.
+ */
+
+export const DESIGN_DIRECTORY = "design";
+export const DESIGN_MANIFEST_PATH = `${DESIGN_DIRECTORY}/canvas.json`;
+export const DESIGN_SCREENS_DIRECTORY = `${DESIGN_DIRECTORY}/screens`;
+
+export const DEFAULT_FRAME_WIDTH = 1440;
+export const DEFAULT_FRAME_HEIGHT = 900;
+export const UNLISTED_SECTION_TITLE = "Not on the canvas yet";
+
+export interface DesignFrame {
+  /** Relative to `design/`, optionally with a `#hash` variant. */
+  readonly file: string;
+  readonly title: string;
+  readonly width: number;
+  readonly height: number;
+  /** The screen scrolls inside its frame instead of being clipped. */
+  readonly scroll: boolean;
+}
+
+export interface DesignSection {
+  readonly title: string | null;
+  readonly frames: ReadonlyArray<DesignFrame>;
+}
+
+export interface DesignPage {
+  readonly name: string;
+  readonly sections: ReadonlyArray<DesignSection>;
+}
+
+export interface DesignCanvas {
+  readonly title: string | null;
+  readonly pages: ReadonlyArray<DesignPage>;
+}
+
+export type DesignManifestResult =
+  | { readonly _tag: "Missing" }
+  | { readonly _tag: "Invalid"; readonly message: string }
+  | { readonly _tag: "Valid"; readonly canvas: DesignCanvas };
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const readString = (value: unknown): string | null =>
+  typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+
+const readSize = (value: unknown, fallback: number): number => {
+  const size = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(size) && size >= 40 ? Math.min(Math.round(size), 20_000) : fallback;
+};
+
+/** A screen path the viewer can serve: inside `design/`, no dot segments. */
+export function normalizeScreenFile(file: string): string | null {
+  const [path = "", ...hash] = file.trim().replace(/^\.\//, "").split("#");
+  const segments = path.split("/");
+  if (
+    path.length === 0 ||
+    path.startsWith("/") ||
+    segments.some((segment) => segment.length === 0 || segment.startsWith(".")) ||
+    !/\.html?$/i.test(path)
+  ) {
+    return null;
+  }
+  return hash.length > 0 ? `${path}#${hash.join("#")}` : path;
+}
+
+export function screenTitleFromFile(file: string): string {
+  const name = file.split("#", 1)[0]!.split("/").pop() ?? file;
+  const base = name.replace(/\.html?$/i, "").replace(/[-_]+/g, " ");
+  return base.length > 0 ? base[0]!.toUpperCase() + base.slice(1) : file;
+}
+
+function readFrame(value: unknown): DesignFrame | null {
+  if (!isRecord(value)) return null;
+  const rawFile = readString(value.file);
+  const file = rawFile === null ? null : normalizeScreenFile(rawFile);
+  if (file === null) return null;
+  return {
+    file,
+    title: readString(value.title) ?? screenTitleFromFile(file),
+    width: readSize(value.width, DEFAULT_FRAME_WIDTH),
+    height: readSize(value.height, DEFAULT_FRAME_HEIGHT),
+    scroll: value.scroll === true,
+  };
+}
+
+function readSection(value: unknown): DesignSection | null {
+  if (!isRecord(value) || !Array.isArray(value.frames)) return null;
+  return {
+    title: readString(value.title),
+    frames: value.frames.flatMap((frame) => readFrame(frame) ?? []),
+  };
+}
+
+function readPage(value: unknown, index: number): DesignPage | null {
+  if (!isRecord(value) || !Array.isArray(value.sections)) return null;
+  return {
+    name: readString(value.name) ?? `Page ${index + 1}`,
+    sections: value.sections.flatMap((section) => readSection(section) ?? []),
+  };
+}
+
+/**
+ * Reads `canvas.json`. Accepts `pages`, or a bare `sections` or `frames` list
+ * for a one-page canvas. Entries it cannot use are skipped, not fatal, so one
+ * bad frame does not blank the canvas.
+ */
+export function parseDesignManifest(contents: string | null): DesignManifestResult {
+  if (contents === null) return { _tag: "Missing" };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(contents);
+  } catch (error) {
+    return {
+      _tag: "Invalid",
+      message: `canvas.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (!isRecord(raw)) return { _tag: "Invalid", message: "canvas.json must be a JSON object." };
+  const pages = Array.isArray(raw.pages)
+    ? raw.pages.flatMap((page, index) => readPage(page, index) ?? [])
+    : Array.isArray(raw.sections)
+      ? [readPage({ sections: raw.sections }, 0)!]
+      : Array.isArray(raw.frames)
+        ? [readPage({ sections: [{ frames: raw.frames }] }, 0)!]
+        : [];
+  return { _tag: "Valid", canvas: { title: readString(raw.title), pages } };
+}
+
+/**
+ * Screens in `design/screens/` that no page lists still show, on the first
+ * page in their own section, so a screen is never lost to a missed entry.
+ */
+export function withUnlistedScreens(
+  canvas: DesignCanvas,
+  screenFiles: ReadonlyArray<string>,
+): DesignCanvas {
+  const listed = new Set(
+    canvas.pages.flatMap((page) =>
+      page.sections.flatMap((section) => section.frames.map((frame) => frame.file.split("#")[0])),
+    ),
+  );
+  const unlisted = screenFiles
+    .filter((file) => /\.html?$/i.test(file) && !listed.has(file))
+    .toSorted((left, right) => left.localeCompare(right))
+    .map((file): DesignFrame => ({
+      file,
+      title: screenTitleFromFile(file),
+      width: DEFAULT_FRAME_WIDTH,
+      height: DEFAULT_FRAME_HEIGHT,
+      scroll: true,
+    }));
+  if (unlisted.length === 0) return canvas;
+  const [first, ...rest] =
+    canvas.pages.length > 0 ? canvas.pages : [{ name: "Page 1", sections: [] }];
+  return {
+    ...canvas,
+    pages: [
+      {
+        ...first!,
+        sections: [...first!.sections, { title: UNLISTED_SECTION_TITLE, frames: unlisted }],
+      },
+      ...rest,
+    ],
+  };
+}
+
+// Layout, in canvas pixels at 100%.
+export const FRAME_GAP = 80;
+export const ROW_GAP = 260;
+export const SECTION_GAP = 260;
+export const HEADING_SIZE = 96;
+// Frame names keep a fixed on-screen height (26px) down to 12% zoom, so the
+// space above a row holds one at that zoom: 26 / 0.12 ≈ 220.
+export const HEADING_GAP = 240;
+export const MAX_ROW_WIDTH = 6400;
+
+export interface PlacedFrame extends DesignFrame {
+  readonly key: string;
+  readonly x: number;
+  readonly y: number;
+}
+
+export interface PlacedHeading {
+  readonly key: string;
+  readonly title: string;
+  readonly x: number;
+  readonly y: number;
+}
+
+export interface DesignLayout {
+  readonly frames: ReadonlyArray<PlacedFrame>;
+  readonly headings: ReadonlyArray<PlacedHeading>;
+  readonly width: number;
+  readonly height: number;
+}
+
+/** Sections stack top to bottom; a section's frames sit in rows that wrap. */
+export function layoutDesignPage(page: DesignPage | undefined): DesignLayout {
+  const frames: PlacedFrame[] = [];
+  const headings: PlacedHeading[] = [];
+  let y = 0;
+  let width = 0;
+  (page?.sections ?? []).forEach((section, sectionIndex) => {
+    if (section.title !== null) {
+      headings.push({ key: `heading:${sectionIndex}`, title: section.title, x: 0, y });
+      y += HEADING_SIZE + HEADING_GAP;
+    }
+    let x = 0;
+    let rowHeight = 0;
+    section.frames.forEach((frame, frameIndex) => {
+      if (x > 0 && x + frame.width > MAX_ROW_WIDTH) {
+        x = 0;
+        y += rowHeight + ROW_GAP;
+        rowHeight = 0;
+      }
+      frames.push({ ...frame, key: `${sectionIndex}:${frameIndex}:${frame.file}`, x, y });
+      width = Math.max(width, x + frame.width);
+      x += frame.width + FRAME_GAP;
+      rowHeight = Math.max(rowHeight, frame.height);
+    });
+    y += rowHeight + SECTION_GAP;
+  });
+  return { frames, headings, width: Math.max(width, 1), height: Math.max(y - SECTION_GAP, 1) };
+}
+
+export interface CanvasView {
+  readonly x: number;
+  readonly y: number;
+  readonly zoom: number;
+}
+
+export const MIN_ZOOM = 0.03;
+export const MAX_ZOOM = 4;
+
+export const clampZoom = (zoom: number): number => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom));
+
+/** Zooms by `factor` keeping the canvas point under (cx, cy) in place. */
+export function zoomViewAt(view: CanvasView, factor: number, cx: number, cy: number): CanvasView {
+  const zoom = clampZoom(view.zoom * factor);
+  const worldX = (cx - view.x) / view.zoom;
+  const worldY = (cy - view.y) / view.zoom;
+  return { zoom, x: cx - worldX * zoom, y: cy - worldY * zoom };
+}
+
+/**
+ * Fits a canvas rectangle in the viewport, never past 100%: centered across,
+ * anchored to the top like a design tool, so spare height falls below.
+ */
+export function fitViewToRect(
+  rect: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+  viewport: { readonly width: number; readonly height: number; readonly top: number },
+  padding: number,
+): CanvasView {
+  const usableHeight = Math.max(1, viewport.height - viewport.top - padding * 2);
+  const usableWidth = Math.max(1, viewport.width - padding * 2);
+  const zoom = clampZoom(Math.min(usableWidth / rect.width, usableHeight / rect.height, 1));
+  return {
+    zoom,
+    x: (viewport.width - rect.width * zoom) / 2 - rect.x * zoom,
+    y: viewport.top + padding - rect.y * zoom,
+  };
+}
+
+/**
+ * Wheel input: trackpad pinches arrive as ctrl+wheel with small deltas, mouse
+ * wheels with large ones, so a single step is capped near 1.35x.
+ */
+export function wheelZoomFactor(deltaY: number): number {
+  return Math.exp(-Math.max(-50, Math.min(50, deltaY)) * 0.006);
+}
+
+/** The asset URL for a screen, with the workspace revision so edits reload it. */
+export function screenFrameSrc(
+  assetUrl: string,
+  file: string,
+  workspaceMutationId: string | null,
+): string {
+  const hashAt = file.indexOf("#");
+  const hash = hashAt === -1 ? "" : file.slice(hashAt);
+  if (workspaceMutationId === null) return `${assetUrl}${hash}`;
+  const separator = assetUrl.includes("?") ? "&" : "?";
+  return `${assetUrl}${separator}workspace-revision=${encodeURIComponent(workspaceMutationId)}${hash}`;
+}
+
+// `design/` as a path segment: at the start, after a separator, or after the
+// space, quote or `=` that begins a path in a shell command.
+const DESIGN_PATH_PATTERN = /(^|[\s"'=\\/])design[\\/]/;
+
+interface TurnItemLike {
+  readonly id: string;
+  readonly runId: string | null;
+  readonly type: string;
+  readonly status: string;
+  readonly fileName?: string | undefined;
+  readonly changes?:
+    | ReadonlyArray<{ readonly path: string; readonly oldPath?: string | undefined }>
+    | undefined;
+  /** A command's text; other item types carry unrelated input. */
+  readonly input?: unknown;
+}
+
+const touchesDesign = (item: TurnItemLike): boolean => {
+  if (item.type === "file_change") {
+    return (
+      DESIGN_PATH_PATTERN.test(item.fileName ?? "") ||
+      (item.changes ?? []).some(
+        (change) =>
+          DESIGN_PATH_PATTERN.test(change.path) || DESIGN_PATH_PATTERN.test(change.oldPath ?? ""),
+      )
+    );
+  }
+  // A shell command does not report the paths it touched; one naming the
+  // folder (cp, mv, a generator script) may have changed screens.
+  return (
+    item.type === "command_execution" &&
+    typeof item.input === "string" &&
+    DESIGN_PATH_PATTERN.test(item.input)
+  );
+};
+
+/**
+ * What the canvas needs from a thread's items: a revision that changes only
+ * when design files may have changed (so other edits do not reload every
+ * screen), and the runs that changed them (to open the canvas when one ends).
+ */
+export function designChangesOfItems(items: ReadonlyArray<TurnItemLike>): {
+  readonly revision: string | null;
+  readonly runIds: ReadonlySet<string>;
+} {
+  let revision: string | null = null;
+  const runIds = new Set<string>();
+  for (const item of items) {
+    if (item.status === "pending" || item.status === "running" || item.status === "waiting") {
+      continue;
+    }
+    if (!touchesDesign(item)) continue;
+    revision = item.id;
+    if (item.runId !== null) runIds.add(item.runId);
+  }
+  return { revision, runIds };
+}

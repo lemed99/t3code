@@ -1,0 +1,654 @@
+import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
+import { FileCode2, Frame, Maximize, Minus, Plus } from "lucide-react";
+import {
+  type PointerEvent as ReactPointerEvent,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+
+import { useAssetUrlState } from "~/assets/assetUrls";
+import { Button } from "~/components/ui/button";
+import {
+  Empty,
+  EmptyDescription,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+} from "~/components/ui/empty";
+import {
+  Select,
+  SelectItem,
+  SelectPopup,
+  SelectTrigger,
+  SelectValue,
+} from "~/components/ui/select";
+import { Spinner } from "~/components/ui/spinner";
+import { RefreshIcon } from "~/components/ui/refresh-icon";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
+import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
+import { cn } from "~/lib/utils";
+
+import { workspaceAssetResource } from "../files/filePreviewMode";
+import { useProjectEntriesQuery, useProjectFileQuery } from "../files/projectFilesQueryState";
+import {
+  type CanvasView,
+  DESIGN_DIRECTORY,
+  DESIGN_MANIFEST_PATH,
+  DESIGN_SCREENS_DIRECTORY,
+  type DesignCanvas,
+  HEADING_SIZE,
+  type PlacedFrame,
+  fitViewToRect,
+  layoutDesignPage,
+  parseDesignManifest,
+  screenFrameSrc,
+  wheelZoomFactor,
+  withUnlistedScreens,
+  zoomViewAt,
+} from "./designCanvas.logic";
+
+/** Room for the floating toolbars above the content when fitting. */
+const TOOLBAR_SPACE = 52;
+/** Below this zoom frame labels would crowd each other and the headings. */
+const LABEL_MIN_ZOOM = 0.12;
+
+const viewportSize = (viewport: HTMLElement | null) => ({
+  width: viewport?.clientWidth ?? 800,
+  height: viewport?.clientHeight ?? 600,
+});
+
+// Views survive the panel unmounting while another tab is shown.
+const savedViews = new Map<string, { page: number; view: CanvasView }>();
+
+export interface DesignCanvasPanelProps {
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+  readonly threadRef: ScopedThreadRef;
+  /** The thread is a draft the server does not know yet. */
+  readonly draft: boolean;
+  /** Changes when the agent may have changed design files; reloads the screens. */
+  readonly designRevision: string | null;
+  readonly onOpenFile: (relativePath: string) => void;
+}
+
+/**
+ * The project's design canvas: every screen in `design/` as a frame on a
+ * pan-and-zoom board. Screens are self-contained HTML files the agent writes;
+ * each runs in a sandboxed frame with an opaque origin, like the file viewer.
+ */
+export default function DesignCanvasPanel(props: DesignCanvasPanelProps) {
+  const manifest = useProjectFileQuery(props.environmentId, props.cwd, DESIGN_MANIFEST_PATH);
+  const screens = useProjectEntriesQuery(props.environmentId, props.cwd, DESIGN_SCREENS_DIRECTORY);
+  const refreshManifest = manifest.refresh;
+  const refreshScreens = screens.refresh;
+  const refresh = useCallback(() => {
+    refreshManifest();
+    refreshScreens();
+  }, [refreshManifest, refreshScreens]);
+  useWorkspaceMutationRefresh({
+    mutationId: props.designRevision,
+    refresh,
+    resourceKey: `${props.environmentId}:${props.cwd}:design-canvas`,
+  });
+  // Files changed outside this thread (by hand, or another thread's agent)
+  // reload on request: rereads the list and every screen.
+  const [manualReloads, setManualReloads] = useState(0);
+  const designRevision =
+    manualReloads === 0 ? props.designRevision : `${props.designRevision ?? ""}:${manualReloads}`;
+  const reload = useCallback(() => {
+    refresh();
+    setManualReloads((count) => count + 1);
+  }, [refresh]);
+
+  const parsed = useMemo(
+    () => parseDesignManifest(manifest.data?.contents ?? null),
+    [manifest.data?.contents],
+  );
+  const screenFiles = useMemo(
+    () =>
+      (screens.data?.entries ?? [])
+        .filter((entry) => entry.kind === "file")
+        .map((entry) => entry.path.slice(DESIGN_DIRECTORY.length + 1)),
+    [screens.data?.entries],
+  );
+  const canvas = useMemo<DesignCanvas>(
+    () =>
+      withUnlistedScreens(
+        parsed._tag === "Valid" ? parsed.canvas : { title: null, pages: [] },
+        screenFiles,
+      ),
+    [parsed, screenFiles],
+  );
+  const frameCount = canvas.pages.reduce(
+    (count, page) => count + page.sections.reduce((sum, section) => sum + section.frames.length, 0),
+    0,
+  );
+
+  if (frameCount === 0) {
+    if (manifest.isPending || screens.isPending) {
+      return (
+        <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
+          <Spinner size="lg" />
+        </div>
+      );
+    }
+    return (
+      <Empty className="min-h-0 flex-1">
+        <EmptyHeader>
+          <EmptyMedia variant="icon">
+            <Frame />
+          </EmptyMedia>
+          <EmptyTitle>
+            {parsed._tag === "Invalid" ? "The canvas can't be read" : "No designs yet"}
+          </EmptyTitle>
+          <EmptyDescription>
+            {parsed._tag === "Invalid"
+              ? `${parsed.message} Ask the agent to fix design/canvas.json.`
+              : "Ask the agent to design a screen. Designs are HTML files in design/screens, and they appear here as the agent makes them."}
+          </EmptyDescription>
+        </EmptyHeader>
+      </Empty>
+    );
+  }
+
+  return (
+    <DesignBoard
+      {...props}
+      designRevision={designRevision}
+      onReload={reload}
+      canvas={canvas}
+      warning={parsed._tag === "Invalid" ? parsed.message : null}
+    />
+  );
+}
+
+function DesignBoard(
+  props: DesignCanvasPanelProps & {
+    readonly canvas: DesignCanvas;
+    readonly warning: string | null;
+    readonly onReload: () => void;
+  },
+) {
+  const viewKey = `${props.environmentId}:${props.cwd}`;
+  const saved = savedViews.get(viewKey);
+  const [pageIndex, setPageIndex] = useState(() =>
+    saved && saved.page < props.canvas.pages.length ? saved.page : 0,
+  );
+  const page = props.canvas.pages[Math.min(pageIndex, props.canvas.pages.length - 1)];
+  const layout = useMemo(() => layoutDesignPage(page), [page]);
+
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const worldRef = useRef<HTMLDivElement>(null);
+  const viewRef = useRef<CanvasView | null>(saved?.view ?? null);
+  const [zoomPercent, setZoomPercent] = useState(100);
+  const [tiny, setTiny] = useState(false);
+  const [liveKey, setLiveKey] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  // Until the user pans or zooms, the view follows the panel's size: it opens
+  // with an animation, so the first measurement is rarely the final one.
+  const autoFitRef = useRef(saved === undefined);
+
+  // Pan and zoom write the transform directly: re-rendering every frame on
+  // each pointer move would be wasted work.
+  const applyView = useCallback(
+    (view: CanvasView) => {
+      viewRef.current = view;
+      const world = worldRef.current;
+      const viewport = viewportRef.current;
+      if (world) {
+        world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
+        world.style.setProperty("--canvas-zoom", String(view.zoom));
+      }
+      if (viewport) {
+        let dot = 24 * view.zoom;
+        while (dot < 12) dot *= 2;
+        viewport.style.backgroundSize = `${dot}px ${dot}px`;
+        viewport.style.backgroundPosition = `${view.x}px ${view.y}px`;
+      }
+      setZoomPercent(Math.round(view.zoom * 100));
+      setTiny(view.zoom < LABEL_MIN_ZOOM);
+      savedViews.set(viewKey, { page: pageIndex, view });
+    },
+    [pageIndex, viewKey],
+  );
+
+  // Fitting hands the view back to the panel size until the user moves it again.
+  const fitAll = useCallback(() => {
+    autoFitRef.current = true;
+    const size = viewportSize(viewportRef.current);
+    applyView(
+      fitViewToRect(
+        { x: 0, y: 0, width: layout.width, height: layout.height },
+        { ...size, top: TOOLBAR_SPACE },
+        24,
+      ),
+    );
+  }, [applyView, layout.width, layout.height]);
+
+  const zoomToFrame = useCallback(
+    (frame: PlacedFrame) => {
+      autoFitRef.current = false;
+      const size = viewportSize(viewportRef.current);
+      applyView(
+        fitViewToRect(
+          { x: frame.x, y: frame.y - 40, width: frame.width, height: frame.height + 40 },
+          { ...size, top: TOOLBAR_SPACE },
+          32,
+        ),
+      );
+    },
+    [applyView],
+  );
+
+  const zoomBy = useCallback(
+    (factor: number, cx?: number, cy?: number) => {
+      const view = viewRef.current;
+      if (!view) return;
+      autoFitRef.current = false;
+      const size = viewportSize(viewportRef.current);
+      applyView(zoomViewAt(view, factor, cx ?? size.width / 2, cy ?? size.height / 2));
+    },
+    [applyView],
+  );
+
+  // First paint of a page: restore the saved view, or fit everything.
+  const initializedPageRef = useRef<number | null>(null);
+  useLayoutEffect(() => {
+    if (initializedPageRef.current === pageIndex) return;
+    const restore = initializedPageRef.current === null ? viewRef.current : null;
+    initializedPageRef.current = pageIndex;
+    setLiveKey(null);
+    setSelectedKey(null);
+    if (restore) applyView(restore);
+    else {
+      autoFitRef.current = true;
+      fitAll();
+    }
+  }, [applyView, fitAll, pageIndex]);
+
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const observer = new ResizeObserver(() => {
+      if (autoFitRef.current) fitAll();
+    });
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [fitAll]);
+
+  // Wheel needs a non-passive listener to keep the page from scrolling.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    const onWheel = (event: WheelEvent) => {
+      const view = viewRef.current;
+      if (!view) return;
+      event.preventDefault();
+      autoFitRef.current = false;
+      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
+      const dx = event.deltaX * unit;
+      const dy = event.deltaY * unit;
+      const rect = viewport.getBoundingClientRect();
+      if (event.ctrlKey || event.metaKey) {
+        applyView(
+          zoomViewAt(
+            view,
+            wheelZoomFactor(dy),
+            event.clientX - rect.left,
+            event.clientY - rect.top,
+          ),
+        );
+      } else if (event.shiftKey && dx === 0) {
+        applyView({ ...view, x: view.x - dy });
+      } else {
+        applyView({ ...view, x: view.x - dx, y: view.y - dy });
+      }
+    };
+    viewport.addEventListener("wheel", onWheel, { passive: false });
+    return () => viewport.removeEventListener("wheel", onWheel);
+  }, [applyView]);
+
+  const pointers = useRef(new Map<number, { x: number; y: number }>());
+  const drag = useRef<{ x: number; y: number; view: CanvasView } | null>(null);
+  const pinch = useRef<{ distance: number; zoom: number } | null>(null);
+
+  const frameKeyAt = (target: EventTarget | null): string | null =>
+    target instanceof Element
+      ? (target.closest<HTMLElement>("[data-frame-key]")?.dataset.frameKey ?? null)
+      : null;
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button === 2) return;
+    if (event.target instanceof Element && event.target.closest("button, [role='combobox']"))
+      return;
+    const key = frameKeyAt(event.target);
+    if (liveKey !== null && key !== liveKey) setLiveKey(null);
+    setSelectedKey(key);
+    event.currentTarget.setPointerCapture(event.pointerId);
+    pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const view = viewRef.current;
+    if (!view) return;
+    if (pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      pinch.current = { distance: Math.hypot(a!.x - b!.x, a!.y - b!.y), zoom: view.zoom };
+      drag.current = null;
+    } else {
+      drag.current = { x: event.clientX, y: event.clientY, view };
+    }
+  };
+
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!pointers.current.has(event.pointerId)) return;
+    pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    const view = viewRef.current;
+    if (!view) return;
+    if (pinch.current && pointers.current.size === 2) {
+      const [a, b] = [...pointers.current.values()];
+      const rect = event.currentTarget.getBoundingClientRect();
+      autoFitRef.current = false;
+      const target =
+        (pinch.current.zoom * Math.hypot(a!.x - b!.x, a!.y - b!.y)) / pinch.current.distance;
+      applyView(
+        zoomViewAt(
+          view,
+          target / view.zoom,
+          (a!.x + b!.x) / 2 - rect.left,
+          (a!.y + b!.y) / 2 - rect.top,
+        ),
+      );
+      return;
+    }
+    if (drag.current) {
+      autoFitRef.current = false;
+      applyView({
+        ...view,
+        x: drag.current.view.x + event.clientX - drag.current.x,
+        y: drag.current.view.y + event.clientY - drag.current.y,
+      });
+    }
+  };
+
+  const onPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    pointers.current.delete(event.pointerId);
+    if (pointers.current.size < 2) pinch.current = null;
+    if (pointers.current.size === 0) drag.current = null;
+  };
+
+  const onDoubleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    // Pointer capture retargets the event to the board; find what is under it.
+    const key = frameKeyAt(document.elementFromPoint(event.clientX, event.clientY));
+    window.getSelection()?.removeAllRanges();
+    if (key !== null) setLiveKey(key);
+    else fitAll();
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.target !== event.currentTarget) return;
+    if (event.key === "Escape") {
+      if (liveKey !== null) setLiveKey(null);
+      else setSelectedKey(null);
+      return;
+    }
+    const selected = layout.frames.find((frame) => frame.key === selectedKey);
+    const actions: Record<string, () => void> = {
+      "1": fitAll,
+      "0": () => zoomBy(1 / (viewRef.current?.zoom ?? 1)),
+      "=": () => zoomBy(1.25),
+      "+": () => zoomBy(1.25),
+      "-": () => zoomBy(0.8),
+      "2": () => selected && zoomToFrame(selected),
+    };
+    const action = actions[event.key];
+    if (!action || event.metaKey || event.ctrlKey || event.altKey) return;
+    event.preventDefault();
+    action();
+  };
+
+  const liveFrame = layout.frames.find((frame) => frame.key === liveKey);
+
+  return (
+    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div
+        ref={viewportRef}
+        tabIndex={0}
+        aria-label="Design canvas"
+        data-tiny={tiny ? "" : undefined}
+        className="group/canvas relative min-h-0 flex-1 cursor-grab touch-none overflow-hidden bg-muted/40 outline-none select-none active:cursor-grabbing"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerEnd}
+        onPointerCancel={onPointerEnd}
+        onDoubleClick={onDoubleClick}
+        onKeyDown={onKeyDown}
+        style={{ backgroundImage: "radial-gradient(var(--color-border) 1px, transparent 1px)" }}
+      >
+        <div ref={worldRef} className="absolute top-0 left-0 origin-top-left will-change-transform">
+          {layout.headings.map((heading) => (
+            <h2
+              key={heading.key}
+              className="absolute m-0 font-bold tracking-tight whitespace-nowrap text-foreground"
+              style={{ left: heading.x, top: heading.y, fontSize: HEADING_SIZE, lineHeight: 1 }}
+            >
+              {heading.title}
+            </h2>
+          ))}
+          {layout.frames.map((frame) => (
+            <DesignFrameView
+              key={frame.key}
+              frame={frame}
+              environmentId={props.environmentId}
+              cwd={props.cwd}
+              threadRef={props.threadRef}
+              draft={props.draft}
+              designRevision={props.designRevision}
+              live={frame.key === liveKey}
+              selected={frame.key === selectedKey}
+              onOpenFile={props.onOpenFile}
+              onZoomTo={zoomToFrame}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="pointer-events-none absolute inset-x-2 top-2 flex items-start justify-between gap-2">
+        <div className="pointer-events-auto flex min-w-0 items-center gap-1 rounded-lg border bg-popover p-1 shadow-sm">
+          {props.canvas.title ? (
+            <span className="truncate px-2 text-xs font-medium">{props.canvas.title}</span>
+          ) : null}
+          {props.canvas.pages.length > 1 ? (
+            <Select
+              value={String(pageIndex)}
+              onValueChange={(value) => setPageIndex(Number(value))}
+            >
+              <SelectTrigger size="sm" variant="ghost" aria-label="Canvas page" className="w-auto">
+                <SelectValue>{page?.name}</SelectValue>
+              </SelectTrigger>
+              <SelectPopup alignItemWithTrigger={false}>
+                {props.canvas.pages.map((entry, index) => (
+                  <SelectItem key={`${entry.name}:${index}`} hideIndicator value={String(index)}>
+                    {entry.name}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          ) : !props.canvas.title ? (
+            <span className="truncate px-2 text-xs font-medium">{page?.name}</span>
+          ) : null}
+        </div>
+        <div className="pointer-events-auto flex shrink-0 items-center gap-0.5 rounded-lg border bg-popover p-1 shadow-sm">
+          <ToolbarButton label="Zoom out (−)" onClick={() => zoomBy(0.8)}>
+            <Minus />
+          </ToolbarButton>
+          <Button
+            size="sm"
+            variant="ghost"
+            className="min-w-14"
+            aria-label="Zoom to 100% (0)"
+            onClick={() => zoomBy(1 / (viewRef.current?.zoom ?? 1))}
+          >
+            <span className="tabular-nums">{zoomPercent}%</span>
+          </Button>
+          <ToolbarButton label="Zoom in (+)" onClick={() => zoomBy(1.25)}>
+            <Plus />
+          </ToolbarButton>
+          <ToolbarButton label="Fit everything (1)" onClick={fitAll}>
+            <Maximize />
+          </ToolbarButton>
+          <ToolbarButton label="Reload designs" onClick={props.onReload}>
+            <RefreshIcon />
+          </ToolbarButton>
+        </div>
+      </div>
+
+      {liveFrame || props.warning ? (
+        <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-3">
+          <div className="max-w-full truncate rounded-lg border bg-popover px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
+            {liveFrame ? (
+              <>
+                Using <span className="font-medium text-foreground">{liveFrame.title}</span> · Esc
+                or click outside to return to the canvas
+              </>
+            ) : (
+              props.warning
+            )}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function ToolbarButton(props: {
+  readonly label: string;
+  readonly onClick: () => void;
+  readonly children: React.ReactNode;
+}) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button size="icon-sm" variant="ghost" aria-label={props.label} onClick={props.onClick} />
+        }
+      >
+        {props.children}
+      </TooltipTrigger>
+      <TooltipPopup>{props.label}</TooltipPopup>
+    </Tooltip>
+  );
+}
+
+const DesignFrameView = memo(function DesignFrameView(props: {
+  readonly frame: PlacedFrame;
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+  readonly threadRef: ScopedThreadRef;
+  readonly draft: boolean;
+  readonly designRevision: string | null;
+  readonly live: boolean;
+  readonly selected: boolean;
+  readonly onOpenFile: (relativePath: string) => void;
+  readonly onZoomTo: (frame: PlacedFrame) => void;
+}) {
+  const { frame } = props;
+  const relativePath = `${DESIGN_DIRECTORY}/${frame.file.split("#", 1)[0]}`;
+  const resource = useMemo(
+    () =>
+      workspaceAssetResource({
+        kind: "workspace-file",
+        threadRef: props.threadRef,
+        draft: props.draft,
+        workspaceRoot: props.cwd,
+        absolutePath: resolvePathLinkTarget(relativePath, props.cwd),
+      }),
+    [props.threadRef, props.draft, props.cwd, relativePath],
+  );
+  const assetUrl = useAssetUrlState(props.environmentId, resource);
+  // Keep one URL per revision: a re-minted token alone must not reload the screen.
+  const [src, setSrc] = useState<{ revision: string | null; url: string } | null>(null);
+  const liveUrl = assetUrl._tag === "Success" ? assetUrl.url : null;
+  useEffect(() => {
+    if (liveUrl === null) return;
+    setSrc((current) =>
+      current !== null && current.revision === props.designRevision
+        ? current
+        : {
+            revision: props.designRevision,
+            url: screenFrameSrc(liveUrl, frame.file, props.designRevision),
+          },
+    );
+  }, [liveUrl, frame.file, props.designRevision]);
+
+  const accent = props.live || props.selected;
+  return (
+    <div
+      data-frame-key={frame.key}
+      className="absolute"
+      style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
+    >
+      <div
+        className={cn(
+          "@container absolute bottom-full left-0 flex h-[26px] origin-bottom-left items-center gap-1 text-xs whitespace-nowrap text-muted-foreground group-data-[tiny]/canvas:hidden",
+          accent && "text-primary",
+        )}
+        style={{
+          width: `calc(${frame.width}px * var(--canvas-zoom, 1))`,
+          transform: "scale(calc(1 / var(--canvas-zoom, 1)))",
+        }}
+        onDoubleClick={(event) => {
+          event.stopPropagation();
+          props.onZoomTo(frame);
+        }}
+      >
+        <span className="min-w-0 flex-1 truncate">{frame.title}</span>
+        <span className="tabular-nums opacity-70 @max-[240px]:hidden">
+          {frame.width} × {frame.height}
+        </span>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="icon-xs"
+                variant="ghost-muted"
+                className="@max-[110px]:hidden"
+                aria-label={`Open ${relativePath}`}
+                onClick={() => props.onOpenFile(relativePath)}
+              />
+            }
+          >
+            <FileCode2 />
+          </TooltipTrigger>
+          <TooltipPopup>Open the screen's file</TooltipPopup>
+        </Tooltip>
+      </div>
+      <div
+        className={cn(
+          "absolute inset-0 overflow-hidden rounded-xs bg-white shadow-lg",
+          accent && "outline-2 outline-primary",
+        )}
+      >
+        {src ? (
+          <iframe
+            src={src.url}
+            title={frame.title}
+            sandbox="allow-scripts allow-forms allow-popups allow-downloads"
+            scrolling={frame.scroll ? "auto" : "no"}
+            className={cn(
+              "block size-full border-0 bg-white",
+              !props.live && "pointer-events-none",
+            )}
+          />
+        ) : assetUrl._tag === "Failure" ? (
+          <div className="flex size-full items-center justify-center p-6 text-center text-2xl text-muted-foreground">
+            Couldn't load {relativePath}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+});

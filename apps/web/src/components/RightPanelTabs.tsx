@@ -32,6 +32,7 @@ import {
   ChevronRight,
   FileDiff,
   Files,
+  Frame,
   Globe2,
   Plus,
   TerminalSquare,
@@ -134,6 +135,7 @@ interface RightPanelTabsProps {
   onAddTerminal: () => void;
   onAddDiff: () => void;
   onAddFiles: () => void;
+  onAddCanvas: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddDevice: () => void;
@@ -141,6 +143,7 @@ interface RightPanelTabsProps {
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
+  canvasAvailable: boolean;
   pullRequestAvailable: boolean;
   pullRequestsAvailable: boolean;
   deviceAvailable: boolean;
@@ -168,6 +171,7 @@ const SURFACE_DISABLED_REASONS = {
   browser: "Browser previews are only available in the T3 Code desktop app.",
   terminal: "Terminal surfaces are only available from a project thread.",
   files: "Files are only available when a project is open.",
+  canvas: "The design canvas is only available when a project is open.",
   diff: "Diff is only available for server threads in Git repositories.",
   pullRequest: "This thread's branch has no pull request yet.",
   pullRequests: "No linked pull requests are available for this thread.",
@@ -189,6 +193,7 @@ const SURFACE_UNAVAILABLE_HINTS = {
   browser: "Only available in the desktop app.",
   terminal: "Available when a project is open.",
   files: "Available when a project is open.",
+  canvas: "Available when a project is open.",
   diff: "Available for Git repositories.",
   pullRequest: "No pull request on this branch yet.",
   pullRequests: "No linked pull requests available.",
@@ -311,6 +316,7 @@ function RightPanelEmptyState(props: {
   onAddTerminal: () => void;
   onAddDiff: () => void;
   onAddFiles: () => void;
+  onAddCanvas: () => void;
   onAddPullRequest: () => void;
   onAddPullRequests: () => void;
   onAddDevice: () => void;
@@ -318,6 +324,7 @@ function RightPanelEmptyState(props: {
   terminalAvailable: boolean;
   diffAvailable: boolean;
   filesAvailable: boolean;
+  canvasAvailable: boolean;
   pullRequestAvailable: boolean;
   pullRequestsAvailable: boolean;
   deviceAvailable: boolean;
@@ -348,6 +355,15 @@ function RightPanelEmptyState(props: {
       available: props.filesAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.files,
       onClick: props.onAddFiles,
+    },
+    {
+      label: "Design canvas",
+      description: "See the project's designs side by side.",
+      icon: Frame,
+      shortcut: "C",
+      available: props.canvasAvailable,
+      disabledReason: SURFACE_UNAVAILABLE_HINTS.canvas,
+      onClick: props.onAddCanvas,
     },
     {
       label: "Diff",
@@ -551,6 +567,8 @@ function surfaceTitle(
       return "Diff";
     case "files":
       return "Files";
+    case "canvas":
+      return "Design";
     case "file":
       return surface.relativePath.slice(
         Math.max(surface.relativePath.lastIndexOf("/"), surface.relativePath.lastIndexOf("\\")) + 1,
@@ -633,6 +651,8 @@ function SurfaceIcon({
       return <FileDiff className="size-3 shrink-0" />;
     case "files":
       return <Files className="size-3 shrink-0" />;
+    case "canvas":
+      return <Frame className="size-3 shrink-0" />;
     case "file":
       return (
         <PierreEntryIcon
@@ -1050,6 +1070,14 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       onClick: props.onAddFiles,
     },
     {
+      label: "Design canvas",
+      icon: Frame,
+      shortcut: "C",
+      available: props.canvasAvailable,
+      disabledReason: SURFACE_DISABLED_REASONS.canvas,
+      onClick: props.onAddCanvas,
+    },
+    {
       label: "Diff",
       icon: FileDiff,
       shortcut: "D",
@@ -1451,6 +1479,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             onAddTerminal={props.onAddTerminal}
             onAddDiff={props.onAddDiff}
             onAddFiles={props.onAddFiles}
+            onAddCanvas={props.onAddCanvas}
             onAddPullRequest={props.onAddPullRequest}
             onAddPullRequests={props.onAddPullRequests}
             onAddDevice={props.onAddDevice}
@@ -1458,6 +1487,7 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
             terminalAvailable={props.terminalAvailable}
             diffAvailable={props.diffAvailable}
             filesAvailable={props.filesAvailable}
+            canvasAvailable={props.canvasAvailable}
             pullRequestAvailable={props.pullRequestAvailable}
             pullRequestsAvailable={props.pullRequestsAvailable}
             deviceAvailable={props.deviceAvailable}

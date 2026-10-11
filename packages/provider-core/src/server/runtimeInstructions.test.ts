@@ -10,6 +10,12 @@ describe("buildRuntimeInstructions", () => {
     expect(instructions).toContain("call list_thread_pull_requests and link any PR");
   });
 
+  it("sends designs to the project's design canvas", () => {
+    const instructions = buildRuntimeInstructions({ harness: "Claude" });
+    expect(instructions).toContain("self-contained HTML file in design/screens/");
+    expect(instructions).toContain("List it in design/canvas.json");
+  });
+
   it("keeps known model and effort metadata on one line", () => {
     expect(
       buildRuntimeInstructions({

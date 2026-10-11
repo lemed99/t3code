@@ -15,6 +15,7 @@ import type { ChatFileAttachment } from "./types";
 const RIGHT_PANEL_KINDS = [
   "diff",
   "files",
+  "canvas",
   "file",
   "preview",
   "device",
@@ -50,6 +51,7 @@ export type RightPanelSurface =
       /** Set when breadcrumbs moved a folder browser up to the workspace root. */
       folderTrail?: string;
     }
+  | { id: "canvas"; kind: "canvas" }
   | {
       id: `file:${string}` | `attachment:${string}`;
       kind: "file";
@@ -117,7 +119,10 @@ interface RightPanelStoreState {
    */
   openProactive: (
     ref: ScopedThreadRef,
-    surface: Extract<RightPanelSurface, { kind: "diff" | "pull-request" | "pull-requests" }>,
+    surface: Extract<
+      RightPanelSurface,
+      { kind: "diff" | "canvas" | "pull-request" | "pull-requests" }
+    >,
     expectedUserActionRevision: number,
   ) => boolean;
   open: (
@@ -210,6 +215,8 @@ const singletonSurface = (
       return { id: "diff", kind };
     case "files":
       return { id: "files", kind };
+    case "canvas":
+      return { id: "canvas", kind };
     case "pull-requests":
       return { id: "pull-requests", kind };
     case "device":

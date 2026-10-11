@@ -2,6 +2,10 @@ const PULL_REQUEST_LINKING_INSTRUCTIONS = `<pull_request_linking>
 When the t3-code MCP server exposes link_pull_request, you must use it to register every pull request you create or work on for this thread. Call link_pull_request with the full PR URL immediately after creating a PR or starting work on an existing PR. For a stack, call it for every layer, not just the current branch or the top PR. This applies when creating or updating PRs through gh, gh stack, another CLI, or the host API: those operations do not register the PRs with this thread. Linking an already-linked PR is safe. Before finishing PR work, call list_thread_pull_requests and link any PR from your work that is missing. Do not link unrelated PRs mentioned only as background. If a linking call fails, report that failure instead of claiming the PR is linked. When asked to monitor, watch, or babysit a PR and watch_pull_request is available, call it and end your turn: T3 Code wakes you when checks finish, someone else comments, or the branch conflicts, so do not poll or run your own watcher. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.
 </pull_request_linking>`;
 
+const DESIGN_CANVAS_INSTRUCTIONS = `<design_canvas>
+When asked to design, mock up or redesign screens, pages, flows or other UI to look at, put each screen on the project's design canvas, which the user sees in T3 Code's Design panel. Write every screen as one self-contained HTML file in design/screens/ (inline CSS and JS; images may sit next to it in design/screens/ or be data: URLs; nothing outside design/, no .json, no dot folders), laid out for its frame size with a matching <meta name="viewport" content="width=...">. List it in design/canvas.json: {"title": "...", "pages": [{"name": "...", "sections": [{"title": "...", "frames": [{"file": "screens/<name>.html", "title": "...", "width": 1440, "height": 900}]}]}]}. Common sizes: desktop 1440x900, iPhone 390x844, Android 412x915. Group a flow in one section, in order; put alternatives on their own page. To change a design, edit its file in place; for an alternative, add a new file and frame beside it. Use realistic content, check each screen renders at its size before finishing, and say which screens you added or changed. Use html_render only for quick visual answers, not for designs.
+</design_canvas>`;
+
 /**
  * Shared runtime context; omit model and effort when the harness manages them dynamically.
  */
@@ -19,7 +23,7 @@ export function buildRuntimeInstructions(runtime: {
     modelName && modelName !== model ? `${modelName} (model slug: ${model})` : model;
   const modelInfo = model && model !== "auto" && model !== "default" ? `, as ${modelLabel}` : "";
   const effortInfo = effort ? ` with ${effort} reasoning effort` : "";
-  return `<runtime_info>In case you're asked: you are running in T3 Code through the ${harness} harness${modelInfo}${effortInfo}. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}`;
+  return `<runtime_info>In case you're asked: you are running in T3 Code through the ${harness} harness${modelInfo}${effortInfo}. No need to mention this otherwise. You can embed images and videos in your response using Markdown with absolute file paths.</runtime_info>\n\n${PULL_REQUEST_LINKING_INSTRUCTIONS}\n\n${DESIGN_CANVAS_INSTRUCTIONS}`;
 }
 
 function toSingleLine(value: string): string {
