@@ -58,7 +58,10 @@ export const makeClaudeAuth = Effect.fn("makeClaudeAuth")(function* (options: {
         env: options.environment,
       })
       .pipe(Effect.mapError(() => failure("start", "Could not open the Claude sign-in terminal.")));
+    // Kept outside the queue so the exit reason is readable the moment it exits.
+    let rawOutput = "";
     const detachData = process.onData((data) => {
+      rawOutput = (rawOutput + data).slice(-TRANSCRIPT_LIMIT);
       Queue.offerUnsafe(output, data.slice(-TRANSCRIPT_LIMIT));
     });
     const detachExit = process.onExit(({ exitCode }) => {
@@ -77,7 +80,15 @@ export const makeClaudeAuth = Effect.fn("makeClaudeAuth")(function* (options: {
     );
     let transcript = "";
     let outputOffset = 0;
-    const update = () =>
+    // Claude's code prompt reads with echo off, so typed input would stay
+    // invisible. Echo it locally; `echoed` lets backspace erase only what we drew.
+    let echoed = 0;
+    const append = (data: string) => {
+      outputOffset += data.length;
+      transcript = (transcript + data).slice(-TRANSCRIPT_LIMIT);
+      return update();
+    };
+    const update = (): Effect.Effect<void> =>
       context.setInteraction(
         { type: "terminal", id: "terminal", output: transcript, outputOffset },
         (response) =>
@@ -88,21 +99,30 @@ export const makeClaudeAuth = Effect.fn("makeClaudeAuth")(function* (options: {
                   if (response.data) process.write(response.data);
                 },
                 catch: () => failure("respond", "The Claude sign-in terminal has closed."),
-              })
+              }).pipe(
+                Effect.andThen(() => {
+                  const echo = localEcho(response.data ?? "", echoed);
+                  echoed = echo.echoed;
+                  return echo.text ? append(echo.text) : Effect.void;
+                }),
+              )
             : Effect.void,
       );
     yield* update();
     yield* Queue.take(output).pipe(
       Effect.flatMap((data) => {
-        outputOffset += data.length;
-        transcript = (transcript + data).slice(-TRANSCRIPT_LIMIT);
-        return update();
+        echoed = 0;
+        return append(data);
       }),
       Effect.forever,
       Effect.forkScoped,
     );
     if ((yield* Deferred.await(exited)) !== 0) {
-      return yield* failure("start", "Claude sign-in did not finish. Start again.");
+      const reason = lastOutputLine(rawOutput);
+      return yield* failure(
+        "start",
+        reason ? `Claude sign-in failed: ${reason}` : "Claude sign-in did not finish. Start again.",
+      );
     }
     yield* context.verifying;
   });
@@ -133,3 +153,40 @@ export const makeClaudeAuth = Effect.fn("makeClaudeAuth")(function* (options: {
   });
   return controller;
 });
+
+// oxlint-disable-next-line no-control-regex -- terminal escape codes are control characters.
+const ANSI_PATTERN = /\u001b\][^\u0007]*(?:\u0007|\u001b\\)|\u001b\[[0-?]*[ -/]*[@-~]|\u001b./g;
+
+/** The last non-empty line a terminal transcript shows, without escape codes. */
+export const lastOutputLine = (transcript: string) =>
+  transcript
+    .replace(ANSI_PATTERN, "")
+    .split(/\r?\n|\r/)
+    .map((line) => line.trim())
+    .findLast((line) => line.length > 0) ?? null;
+
+/**
+ * What to draw for input sent to a prompt that does not echo. Printable text is
+ * shown as typed, Enter starts a new line, and backspace erases only characters
+ * this echo drew. Escape sequences (arrows, focus reports) draw nothing.
+ */
+export const localEcho = (data: string, echoed: number) => {
+  if (data.includes("\u001b")) return { text: "", echoed };
+  let text = "";
+  let count = echoed;
+  for (const char of data) {
+    if (char === "\r" || char === "\n") {
+      text += "\r\n";
+      count = 0;
+    } else if (char === "\u007f" || char === "\b") {
+      if (count > 0) {
+        text += "\b \b";
+        count -= 1;
+      }
+    } else if (char >= " ") {
+      text += char;
+      count += 1;
+    }
+  }
+  return { text, echoed: count };
+};

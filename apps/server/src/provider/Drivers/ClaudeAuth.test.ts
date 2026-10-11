@@ -6,7 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
 
-import { CLAUDE_LOGIN_METHOD_ID, makeClaudeAuth } from "./ClaudeAuth.ts";
+import { CLAUDE_LOGIN_METHOD_ID, lastOutputLine, localEcho, makeClaudeAuth } from "./ClaudeAuth.ts";
 
 const instanceId = ProviderInstanceId.make("claude_team1");
 
@@ -113,6 +113,18 @@ it.effect("signs a Claude account in with its own config directory in a terminal
       response: { type: "terminal", data: "\r" },
     });
     assert.deepEqual(h.written, ["\r"]);
+    yield* h.controller.respond!("owner", {
+      instanceId,
+      flowId: flow.flowId!,
+      interactionId: "terminal",
+      response: { type: "terminal", data: "ab" },
+    });
+    // Claude's code prompt does not echo, so typed text is drawn locally.
+    yield* h.state(
+      (value) =>
+        value.interaction?.type === "terminal" &&
+        value.interaction.output === "Select login method: \r\nab",
+    );
     h.exit(0);
     yield* h.phase("succeeded");
     assert.deepEqual(h.changed, [true]);
@@ -124,8 +136,10 @@ it.effect("fails when the login exits early or the account still reads as signed
     const early = yield* makeHarness({ signedInAfterLogin: true });
     yield* early.controller.start("owner", Effect.void, CLAUDE_LOGIN_METHOD_ID);
     yield* early.phase("waiting");
+    early.data("\u001b[31mLogin failed: invalid code\u001b[39m\r\n");
     early.exit(1);
-    yield* early.phase("failed");
+    const failed = yield* early.phase("failed");
+    assert.equal(failed.message, "Claude sign-in failed: Login failed: invalid code");
     assert.deepEqual(early.changed, []);
 
     const unverified = yield* makeHarness({ signedInAfterLogin: false });
@@ -146,3 +160,18 @@ it.effect("signs out with claude auth logout and refreshes the account", () =>
     assert.equal((yield* Effect.exit(h.controller.logout(Effect.void)))._tag, "Failure");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
+
+it("echoes typed input that the prompt does not", () => {
+  assert.deepEqual(localEcho("abc", 0), { text: "abc", echoed: 3 });
+  assert.deepEqual(localEcho("\u007f\u007f", 1), { text: "\b \b", echoed: 0 });
+  assert.deepEqual(localEcho("x\r", 2), { text: "x\r\n", echoed: 0 });
+  assert.deepEqual(localEcho("\u001b[A", 2), { text: "", echoed: 2 });
+});
+
+it("reads the last line a transcript shows", () => {
+  assert.equal(
+    lastOutputLine("Paste code here > \r\n\u001b]8;;x\u0007Login failed: nope\r\n\u001b[?25h"),
+    "Login failed: nope",
+  );
+  assert.equal(lastOutputLine("\r\n"), null);
+});
