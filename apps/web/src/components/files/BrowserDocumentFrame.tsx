@@ -93,8 +93,9 @@ export function BrowserDocumentFrame(props: {
       className="min-h-0 flex-1"
     />
   ) : (
+    // No key: a new src reloads this same frame, so a page keeps its
+    // window.name across workspace reloads (a canvas keeps its zoom and position).
     <iframe
-      key={props.src}
       src={props.src}
       title={props.title}
       className={className}
