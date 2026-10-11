@@ -88,11 +88,12 @@ export const makeClaudeContinuationGroupKey = Effect.fn("makeClaudeContinuationG
  */
 export const shareClaudeHistory = Effect.fn("shareClaudeHistory")(function* (
   configDir: string,
-  defaultConfigDir: string = NodeOS.homedir() + "/.claude",
+  defaultConfigDir?: string,
 ): Effect.fn.Return<boolean, never, FileSystem.FileSystem | Path.Path> {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const sharedProjects = path.join(path.resolve(defaultConfigDir), "projects");
+  const sharedRoot = defaultConfigDir ?? path.join(yield* HostProcess.HomeDirectory, ".claude");
+  const sharedProjects = path.join(path.resolve(sharedRoot), "projects");
   const ownProjects = path.join(path.resolve(configDir), "projects");
   if (ownProjects === sharedProjects) return true;
   return yield* Effect.gen(function* () {
