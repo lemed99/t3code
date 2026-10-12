@@ -357,10 +357,10 @@ function RightPanelEmptyState(props: {
       onClick: props.onAddFiles,
     },
     {
-      label: "Design canvas",
-      description: "See the project's designs side by side.",
+      label: "Artifacts",
+      description: "Designs, documents and sheets in the project.",
       icon: Frame,
-      shortcut: "C",
+      shortcut: "A",
       available: props.canvasAvailable,
       disabledReason: SURFACE_UNAVAILABLE_HINTS.canvas,
       onClick: props.onAddCanvas,
@@ -568,7 +568,7 @@ function surfaceTitle(
     case "files":
       return "Files";
     case "canvas":
-      return "Design";
+      return "Artifacts";
     case "file":
       return surface.relativePath.slice(
         Math.max(surface.relativePath.lastIndexOf("/"), surface.relativePath.lastIndexOf("\\")) + 1,
@@ -1070,9 +1070,9 @@ export function RightPanelTabs(props: RightPanelTabsProps) {
       onClick: props.onAddFiles,
     },
     {
-      label: "Design canvas",
+      label: "Artifacts",
       icon: Frame,
-      shortcut: "C",
+      shortcut: "A",
       available: props.canvasAvailable,
       disabledReason: SURFACE_DISABLED_REASONS.canvas,
       onClick: props.onAddCanvas,

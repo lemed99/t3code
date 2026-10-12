@@ -331,6 +331,10 @@ html[data-mobile-composer-route-transition="true"]::view-transition-old(t3-mobil
   }
 }
 
+@utility artifact-document {
+  --font-document-serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Georgia, serif;
+}
+
 @utility surface-glass {
   background: color-mix(in srgb, var(--background) var(--glass-opacity), transparent);
   -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
@@ -2072,6 +2076,71 @@ code {
 .chat-markdown .chat-markdown-table-container[data-expanded="true"] td {
   max-width: 24rem;
   overflow-wrap: anywhere;
+}
+
+/* Artifact documents read like a page in Claude: serif headings, a roomy body
+   and full tables (cells wrap instead of truncating). Unlayered like the
+   chat rules above, with one more class so these win. */
+.chat-markdown.artifact-document {
+  font-size: 1rem;
+  line-height: 1.65;
+}
+
+.chat-markdown.artifact-document :is(h1, h2, h3, h4) {
+  font-family: var(--font-document-serif);
+  font-weight: 400;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+.chat-markdown.artifact-document h1 {
+  margin: 0 0 1rem;
+  font-size: 2.5rem;
+}
+
+.chat-markdown.artifact-document h2 {
+  margin: 2.5rem 0 0.75rem;
+  font-size: 1.75rem;
+}
+
+.chat-markdown.artifact-document h3 {
+  margin: 2rem 0 0.5rem;
+  font-size: 1.35rem;
+}
+
+.chat-markdown.artifact-document h4 {
+  margin: 1.5rem 0 0.5rem;
+  font-size: 1.1rem;
+}
+
+.chat-markdown.artifact-document :is(p, ul, ol, blockquote, pre, .chat-markdown-table-container) {
+  margin: 0.9rem 0;
+}
+
+.chat-markdown.artifact-document table {
+  min-width: 100%;
+  font-size: 0.9rem;
+  border: 1px solid color-mix(in srgb, var(--contrast-border) 70%, transparent);
+}
+
+.chat-markdown.artifact-document :is(th, td) {
+  padding: 0.6rem 0.9rem;
+  vertical-align: top;
+  border: 1px solid color-mix(in srgb, var(--contrast-border) 70%, transparent);
+}
+
+.chat-markdown.artifact-document thead th {
+  background: var(--muted);
+  font-weight: 500;
+  white-space: normal;
+}
+
+.chat-markdown.artifact-document .chat-markdown-table-container :is(th, td) {
+  max-width: 28rem;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: break-word;
 }
 
 :root {

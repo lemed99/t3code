@@ -10,10 +10,11 @@ describe("buildRuntimeInstructions", () => {
     expect(instructions).toContain("call list_thread_pull_requests and link any PR");
   });
 
-  it("sends designs to the project's design canvas", () => {
+  it("sends designs, documents and sheets to the project's artifacts", () => {
     const instructions = buildRuntimeInstructions({ harness: "Claude" });
-    expect(instructions).toContain("self-contained HTML file in design/screens/");
-    expect(instructions).toContain("List it in design/canvas.json");
+    expect(instructions).toContain("self-contained HTML file in artifacts/<name>/screens/");
+    expect(instructions).toContain("artifacts/<name>/document.md");
+    expect(instructions).toContain("Record each artifact in artifacts/index.json");
   });
 
   it("keeps known model and effort metadata on one line", () => {

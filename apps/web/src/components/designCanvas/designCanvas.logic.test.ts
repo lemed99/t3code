@@ -208,6 +208,16 @@ describe("canvas view math", () => {
     ).toBe(1);
   });
 
+  it("keeps tall content readable instead of fitting its whole height", () => {
+    expect(
+      fitViewToRect(
+        { x: 0, y: 0, width: 1000, height: 20_000 },
+        { width: 1040, height: 600, top: 40 },
+        20,
+      ).zoom,
+    ).toBe(0.5);
+  });
+
   it("caps a wheel zoom step", () => {
     expect(wheelZoomFactor(-1000)).toBeCloseTo(Math.exp(0.3));
     expect(wheelZoomFactor(4)).toBeCloseTo(Math.exp(-0.024));
@@ -291,21 +301,25 @@ describe("Claude Design canvases", () => {
           "../escape.dc.html": { x: 0, y: 0, w: 10, h: 10 },
         },
         order: ["Other.dc.html", "Main.dc.html"],
+        launch: { view: "canvas", page: "site" },
         notes: { top: { kind: "title1", text: "Landing", x: 0, y: -300, page: "site" } },
       }),
     );
     expect(result._tag).toBe("Valid");
     const canvas = result._tag === "Valid" ? result.canvas : null;
     expect(canvas?.title).toBe("Venna · Website");
-    expect(canvas?.pages.map((page) => page.name)).toEqual(["getvenna.com"]);
+    // An artboard with no page goes to its own page at the end.
+    expect(canvas?.pages.map((page) => page.name)).toEqual(["getvenna.com", "Other screens"]);
     const layout = layoutDesignPage(canvas?.pages[0]);
     expect(layout.headings).toEqual([{ key: "note:top", title: "Landing", x: 0, y: 0 }]);
     expect(layout.frames.map(({ file, title, x, y }) => ({ file, title, x, y }))).toEqual([
-      { file: "Other.dc.html", title: "Other", x: 1560, y: 300 },
       { file: "Main.dc.html", title: "Home", x: 0, y: 300 },
     ]);
-    expect(layout.width).toBe(1950);
+    expect(layout.width).toBe(1440);
     expect(layout.height).toBe(1200);
+    expect(
+      layoutDesignPage(canvas?.pages[1]).frames.map(({ file, x, y }) => ({ file, x, y })),
+    ).toEqual([{ file: "Other.dc.html", x: 0, y: 0 }]);
   });
 
   it("rejects files that are not Claude Design canvases", () => {

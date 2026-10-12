@@ -1,8 +1,9 @@
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
-import { FileCode2, Frame, Maximize, Minus, Plus } from "lucide-react";
+import { FileCode2, FileText, Frame, Maximize, Minus, Palette, Plus, Table2 } from "lucide-react";
 import {
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
   memo,
   useCallback,
   useEffect,
@@ -35,27 +36,33 @@ import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh
 import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 
+import ChatMarkdown from "../ChatMarkdown";
+import { DelimitedTablePreview } from "../files/DelimitedTablePreview";
 import { workspaceAssetResource } from "../files/filePreviewMode";
 import { useProjectEntriesQuery, useProjectFileQuery } from "../files/projectFilesQueryState";
 import {
   type CanvasView,
-  DESIGN_DIRECTORY,
-  DESIGN_MANIFEST_PATH,
-  DESIGN_SCREENS_DIRECTORY,
+  DEFAULT_FRAME_HEIGHT,
+  DEFAULT_FRAME_WIDTH,
   type DesignCanvas,
-  type DesignManifestResult,
   HEADING_SIZE,
   type PlacedFrame,
-  findClaudeDesignCanvases,
   fitViewToRect,
   layoutDesignPage,
   parseClaudeDesignCanvas,
   parseDesignManifest,
   screenFrameSrc,
+  screenTitleFromFile,
   wheelZoomFactor,
   withUnlistedScreens,
   zoomViewAt,
 } from "./designCanvas.logic";
+import {
+  ARTIFACTS_INDEX_PATH,
+  type ProjectArtifact,
+  findProjectArtifacts,
+  parseArtifactIndex,
+} from "./artifacts.logic";
 
 /** Room for the floating toolbars above the content when fitting. */
 const TOOLBAR_SPACE = 52;
@@ -69,7 +76,7 @@ const viewportSize = (viewport: HTMLElement | null) => ({
 
 // Views survive the panel unmounting while another tab is shown.
 const savedViews = new Map<string, { page: number; view: CanvasView }>();
-// The canvas last shown per project, when it has several.
+// The artifact last shown per project.
 const savedSources = new Map<string, string>();
 
 export interface DesignCanvasPanelProps {
@@ -88,26 +95,195 @@ export interface DesignCanvasPanelProps {
  * pan-and-zoom board. Screens are self-contained HTML files the agent writes;
  * each runs in a sandboxed frame with an opaque origin, like the file viewer.
  */
-export default function DesignCanvasPanel(props: DesignCanvasPanelProps) {
-  const manifest = useProjectFileQuery(props.environmentId, props.cwd, DESIGN_MANIFEST_PATH);
-  const screens = useProjectEntriesQuery(props.environmentId, props.cwd, DESIGN_SCREENS_DIRECTORY);
-  // Canvases copied from Claude Design live anywhere in the project.
+/**
+ * The project's artifacts, one at a time: designs on a pan-and-zoom canvas
+ * (every HTML screen runs in a sandboxed frame with an opaque origin, like the
+ * file viewer), documents rendered, sheets as a table.
+ */
+export default function ArtifactsPanel(props: DesignCanvasPanelProps) {
   const projectEntries = useProjectEntriesQuery(props.environmentId, props.cwd);
-  const claudeCanvases = useMemo(
-    () => findClaudeDesignCanvases((projectEntries.data?.entries ?? []).map((entry) => entry.path)),
-    [projectEntries.data?.entries],
+  const indexFile = useProjectFileQuery(props.environmentId, props.cwd, ARTIFACTS_INDEX_PATH);
+  const artifacts = useMemo(
+    () =>
+      findProjectArtifacts(
+        (projectEntries.data?.entries ?? []).map((entry) => entry.path),
+        parseArtifactIndex(indexFile.data?.contents ?? null),
+      ),
+    [projectEntries.data?.entries, indexFile.data?.contents],
   );
-  const [chosenRoot, setChosenRoot] = useState<string | null>(
-    () => savedSources.get(`${props.environmentId}:${props.cwd}`) ?? null,
+  const projectKey = `${props.environmentId}:${props.cwd}`;
+  const [chosenId, setChosenId] = useState<string | null>(
+    () => savedSources.get(projectKey) ?? null,
   );
-  const chooseRoot = useCallback(
-    (root: string) => {
-      savedSources.set(`${props.environmentId}:${props.cwd}`, root);
-      setChosenRoot(root);
+  const choose = useCallback(
+    (id: string) => {
+      savedSources.set(projectKey, id);
+      setChosenId(id);
     },
-    [props.environmentId, props.cwd],
+    [projectKey],
   );
+  const selected = artifacts.find((artifact) => artifact.id === chosenId) ?? artifacts[0];
 
+  const refreshEntries = projectEntries.refresh;
+  const refreshIndex = indexFile.refresh;
+  const refreshList = useCallback(() => {
+    refreshEntries();
+    refreshIndex();
+  }, [refreshEntries, refreshIndex]);
+  useWorkspaceMutationRefresh({
+    mutationId: props.designRevision,
+    refresh: refreshList,
+    resourceKey: `${projectKey}:artifacts`,
+  });
+  // Files changed outside this thread (by hand, or another thread's agent)
+  // reload on request: rereads the list and the open artifact.
+  const [manualReloads, setManualReloads] = useState(0);
+  const revision =
+    manualReloads === 0 ? props.designRevision : `${props.designRevision ?? ""}:${manualReloads}`;
+  const reload = useCallback(() => {
+    refreshList();
+    setManualReloads((count) => count + 1);
+  }, [refreshList]);
+
+  if (!selected) {
+    if (projectEntries.isPending) return <PanelSpinner />;
+    return (
+      <PanelEmpty
+        title="No artifacts yet"
+        description="Ask the agent for a design, a document or a sheet. Artifacts live in the project's artifacts folder and appear here."
+      />
+    );
+  }
+  const picker = <ArtifactPicker artifacts={artifacts} selected={selected} onSelect={choose} />;
+  const view = { ...props, designRevision: revision, onReload: reload, picker };
+  switch (selected.content._tag) {
+    case "ProjectCanvas":
+      return <ProjectCanvasView key={selected.id} {...view} root={selected.content.root} />;
+    case "ClaudeCanvas":
+      return <ClaudeCanvasView key={selected.id} {...view} root={selected.content.root} />;
+    case "Screens":
+      return (
+        <DesignBoard
+          key={selected.id}
+          {...view}
+          root={selected.content.root}
+          canvas={screensCanvas(selected.title, selected.content.files)}
+          warning={null}
+        />
+      );
+    case "Document":
+      return <ArtifactDocumentView key={selected.id} {...view} path={selected.content.path} />;
+    case "Sheet":
+      return (
+        <ArtifactSheetView
+          key={selected.id}
+          {...view}
+          path={selected.content.path}
+          delimiter={selected.content.delimiter}
+        />
+      );
+  }
+}
+
+interface ArtifactViewProps extends DesignCanvasPanelProps {
+  readonly onReload: () => void;
+  readonly picker: ReactNode;
+}
+
+const ARTIFACT_ICONS = { design: Palette, doc: FileText, sheet: Table2 } as const;
+
+function ArtifactPicker(props: {
+  readonly artifacts: ReadonlyArray<ProjectArtifact>;
+  readonly selected: ProjectArtifact;
+  readonly onSelect: (id: string) => void;
+}) {
+  const SelectedIcon = ARTIFACT_ICONS[props.selected.kind];
+  return (
+    <Select value={props.selected.id} onValueChange={(value) => value && props.onSelect(value)}>
+      <SelectTrigger size="sm" variant="ghost" aria-label="Artifact" className="w-auto min-w-0">
+        <SelectedIcon className="size-4 shrink-0 text-muted-foreground" />
+        <SelectValue>
+          <span className="truncate">{props.selected.title}</span>
+        </SelectValue>
+      </SelectTrigger>
+      <SelectPopup alignItemWithTrigger={false}>
+        {props.artifacts.map((artifact) => {
+          const Icon = ARTIFACT_ICONS[artifact.kind];
+          return (
+            <SelectItem key={artifact.id} value={artifact.id}>
+              <span className="flex min-w-0 items-center gap-2">
+                <Icon className="size-4 shrink-0 text-muted-foreground" />
+                <span className="truncate">{artifact.title}</span>
+              </span>
+            </SelectItem>
+          );
+        })}
+      </SelectPopup>
+    </Select>
+  );
+}
+
+function PanelSpinner() {
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
+      <Spinner size="lg" />
+    </div>
+  );
+}
+
+function PanelEmpty(props: { readonly title: string; readonly description: string }) {
+  return (
+    <Empty className="min-h-0 flex-1">
+      <EmptyHeader>
+        <EmptyMedia variant="icon">
+          <Frame />
+        </EmptyMedia>
+        <EmptyTitle>{props.title}</EmptyTitle>
+        <EmptyDescription>{props.description}</EmptyDescription>
+      </EmptyHeader>
+    </Empty>
+  );
+}
+
+/** HTML screens with no canvas file: one page, side by side, each scrolling. */
+function screensCanvas(title: string, files: ReadonlyArray<string>): DesignCanvas {
+  return {
+    title,
+    pages: [
+      {
+        name: title,
+        sections: [
+          {
+            title: null,
+            frames: files.map((file) => ({
+              file,
+              title: screenTitleFromFile(file),
+              width: DEFAULT_FRAME_WIDTH,
+              height: DEFAULT_FRAME_HEIGHT,
+              scroll: true,
+            })),
+          },
+        ],
+      },
+    ],
+  };
+}
+
+/** A canvas agents write in T3 Code: `canvas.json` and `screens/` in `root`. */
+function ProjectCanvasView(props: ArtifactViewProps & { readonly root: string }) {
+  const manifest = useProjectFileQuery(props.environmentId, props.cwd, `${props.root}/canvas.json`);
+  const screens = useProjectEntriesQuery(props.environmentId, props.cwd, `${props.root}/screens`);
+  const refreshManifest = manifest.refresh;
+  const refreshScreens = screens.refresh;
+  const refresh = useCallback(() => {
+    refreshManifest();
+    refreshScreens();
+  }, [refreshManifest, refreshScreens]);
+  useWorkspaceMutationRefresh({
+    mutationId: props.designRevision,
+    refresh,
+    resourceKey: `${props.environmentId}:${props.cwd}:${props.root}:canvas`,
+  });
   const parsed = useMemo(
     () => parseDesignManifest(manifest.data?.contents ?? null),
     [manifest.data?.contents],
@@ -116,10 +292,10 @@ export default function DesignCanvasPanel(props: DesignCanvasPanelProps) {
     () =>
       (screens.data?.entries ?? [])
         .filter((entry) => entry.kind === "file")
-        .map((entry) => entry.path.slice(DESIGN_DIRECTORY.length + 1)),
-    [screens.data?.entries],
+        .map((entry) => entry.path.slice(props.root.length + 1)),
+    [screens.data?.entries, props.root],
   );
-  const projectCanvas = useMemo<DesignCanvas>(
+  const canvas = useMemo<DesignCanvas>(
     () =>
       withUnlistedScreens(
         parsed._tag === "Valid" ? parsed.canvas : { title: null, pages: [] },
@@ -127,115 +303,146 @@ export default function DesignCanvasPanel(props: DesignCanvasPanelProps) {
       ),
     [parsed, screenFiles],
   );
-  const projectHasFrames = projectCanvas.pages.some((page) =>
-    page.sections.some((section) => section.frames.length > 0),
-  );
-  const root =
-    chosenRoot !== null &&
-    (chosenRoot === DESIGN_DIRECTORY || claudeCanvases.some((entry) => entry.root === chosenRoot))
-      ? chosenRoot
-      : projectHasFrames || claudeCanvases.length === 0
-        ? DESIGN_DIRECTORY
-        : claudeCanvases[0]!.root;
-  const isClaudeCanvas = root !== DESIGN_DIRECTORY;
-  const claudeManifest = useProjectFileQuery(
-    props.environmentId,
-    props.cwd,
-    isClaudeCanvas ? `${root}/canvas.json` : null,
-    isClaudeCanvas,
-  );
-  const claudeParsed = useMemo<DesignManifestResult>(
-    () => parseClaudeDesignCanvas(claudeManifest.data?.contents ?? null),
-    [claudeManifest.data?.contents],
-  );
-
-  const refreshManifest = manifest.refresh;
-  const refreshScreens = screens.refresh;
-  const refreshEntries = projectEntries.refresh;
-  const refreshClaudeManifest = claudeManifest.refresh;
-  const refresh = useCallback(() => {
-    refreshManifest();
-    refreshScreens();
-    refreshEntries();
-    refreshClaudeManifest();
-  }, [refreshManifest, refreshScreens, refreshEntries, refreshClaudeManifest]);
-  useWorkspaceMutationRefresh({
-    mutationId: props.designRevision,
-    refresh,
-    resourceKey: `${props.environmentId}:${props.cwd}:design-canvas`,
-  });
-  // Files changed outside this thread (by hand, or another thread's agent)
-  // reload on request: rereads the list and every screen.
-  const [manualReloads, setManualReloads] = useState(0);
-  const designRevision =
-    manualReloads === 0 ? props.designRevision : `${props.designRevision ?? ""}:${manualReloads}`;
-  const reload = useCallback(() => {
-    refresh();
-    setManualReloads((count) => count + 1);
-  }, [refresh]);
-
-  const sources = useMemo(
-    () => [
-      ...(projectHasFrames || claudeCanvases.length === 0
-        ? [{ root: DESIGN_DIRECTORY, label: "Project designs" }]
-        : []),
-      ...claudeCanvases,
-    ],
-    [projectHasFrames, claudeCanvases],
-  );
-  const activeParsed = isClaudeCanvas ? claudeParsed : parsed;
-  const canvas: DesignCanvas = isClaudeCanvas
-    ? claudeParsed._tag === "Valid"
-      ? claudeParsed.canvas
-      : { title: null, pages: [] }
-    : projectCanvas;
-  const frameCount = canvas.pages.reduce(
-    (count, page) => count + page.sections.reduce((sum, section) => sum + section.frames.length, 0),
-    0,
-  );
-
-  if (frameCount === 0) {
-    const loading = isClaudeCanvas
-      ? claudeManifest.isPending
-      : manifest.isPending || screens.isPending || projectEntries.isPending;
-    if (loading) {
-      return (
-        <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
-          <Spinner size="lg" />
-        </div>
-      );
-    }
-    return (
-      <Empty className="min-h-0 flex-1">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <Frame />
-          </EmptyMedia>
-          <EmptyTitle>
-            {activeParsed._tag === "Invalid" ? "The canvas can't be read" : "No designs yet"}
-          </EmptyTitle>
-          <EmptyDescription>
-            {activeParsed._tag === "Invalid"
-              ? `${activeParsed.message} Ask the agent to fix ${root}/canvas.json.`
-              : "Ask the agent to design a screen. Designs are HTML files in design/screens, and they appear here as the agent makes them."}
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
+  if (!canvas.pages.some((page) => page.sections.some((section) => section.frames.length > 0))) {
+    if (manifest.isPending || screens.isPending) return <PanelSpinner />;
+    return parsed._tag === "Invalid" ? (
+      <PanelEmpty
+        title="The canvas can't be read"
+        description={`${parsed.message} Ask the agent to fix ${props.root}/canvas.json.`}
+      />
+    ) : (
+      <PanelEmpty
+        title="No designs yet"
+        description="Ask the agent to design a screen. Screens appear here as the agent makes them."
+      />
     );
   }
-
   return (
     <DesignBoard
-      key={root}
       {...props}
-      designRevision={designRevision}
-      onReload={reload}
       canvas={canvas}
-      root={root}
-      sources={sources}
-      onSelectSource={chooseRoot}
-      warning={activeParsed._tag === "Invalid" ? activeParsed.message : null}
+      warning={parsed._tag === "Invalid" ? parsed.message : null}
     />
+  );
+}
+
+/** A canvas copied from Claude Design: artboards keep their own positions. */
+function ClaudeCanvasView(props: ArtifactViewProps & { readonly root: string }) {
+  const manifest = useProjectFileQuery(props.environmentId, props.cwd, `${props.root}/canvas.json`);
+  useWorkspaceMutationRefresh({
+    mutationId: props.designRevision,
+    refresh: manifest.refresh,
+    resourceKey: `${props.environmentId}:${props.cwd}:${props.root}`,
+  });
+  const parsed = useMemo(
+    () => parseClaudeDesignCanvas(manifest.data?.contents ?? null),
+    [manifest.data?.contents],
+  );
+  if (parsed._tag !== "Valid" || parsed.canvas.pages.length === 0) {
+    if (manifest.isPending) return <PanelSpinner />;
+    return (
+      <PanelEmpty
+        title="The canvas can't be read"
+        description={
+          parsed._tag === "Invalid" ? parsed.message : `${props.root}/canvas.json has no artboards.`
+        }
+      />
+    );
+  }
+  return <DesignBoard {...props} canvas={parsed.canvas} warning={null} />;
+}
+
+function useArtifactFile(props: ArtifactViewProps & { readonly path: string }) {
+  const file = useProjectFileQuery(props.environmentId, props.cwd, props.path);
+  useWorkspaceMutationRefresh({
+    mutationId: props.designRevision,
+    refresh: file.refresh,
+    resourceKey: `${props.environmentId}:${props.cwd}:${props.path}`,
+  });
+  return file;
+}
+
+/** The bar above every artifact: which one is open, and its actions. */
+function ArtifactHeader(props: {
+  readonly picker: ReactNode;
+  readonly onReload: () => void;
+  readonly children?: ReactNode;
+}) {
+  return (
+    <div className="flex shrink-0 items-center justify-between gap-2 border-b px-2 py-1">
+      <div className="flex min-w-0 items-center">{props.picker}</div>
+      <div className="flex shrink-0 items-center gap-0.5">
+        {props.children}
+        <ToolbarButton label="Reload" onClick={props.onReload}>
+          <RefreshIcon />
+        </ToolbarButton>
+      </div>
+    </div>
+  );
+}
+
+/** Documents read like a page: the panel scrolls, the toolbar stays on top. */
+function ArtifactPage(props: {
+  readonly picker: ReactNode;
+  readonly path: string;
+  readonly onOpenFile: (relativePath: string) => void;
+  readonly onReload: () => void;
+  readonly children: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <ArtifactHeader picker={props.picker} onReload={props.onReload}>
+        <ToolbarButton label="Open file" onClick={() => props.onOpenFile(props.path)}>
+          <FileCode2 />
+        </ToolbarButton>
+      </ArtifactHeader>
+      <div className="min-h-0 flex-1 overflow-auto">{props.children}</div>
+    </div>
+  );
+}
+
+function ArtifactDocumentView(props: ArtifactViewProps & { readonly path: string }) {
+  const file = useArtifactFile(props);
+  return (
+    <ArtifactPage {...props}>
+      {file.data ? (
+        <ChatMarkdown
+          text={file.data.contents}
+          cwd={props.cwd}
+          imageBaseDir={resolvePathLinkTarget(
+            props.path.slice(0, props.path.lastIndexOf("/")),
+            props.cwd,
+          )}
+          threadRef={props.threadRef}
+          className="artifact-document mx-auto max-w-3xl px-8 pt-12 pb-24"
+        />
+      ) : file.isPending ? (
+        <PanelSpinner />
+      ) : (
+        <p className="p-6 text-sm text-muted-foreground">Couldn't load {props.path}</p>
+      )}
+    </ArtifactPage>
+  );
+}
+
+function ArtifactSheetView(
+  props: ArtifactViewProps & { readonly path: string; readonly delimiter: "," | "\t" },
+) {
+  const file = useArtifactFile(props);
+  return (
+    <ArtifactPage {...props}>
+      {file.data ? (
+        <DelimitedTablePreview
+          name={props.path}
+          text={file.data.contents}
+          delimiter={props.delimiter}
+        />
+      ) : file.isPending ? (
+        <PanelSpinner />
+      ) : (
+        <p className="p-6 text-sm text-muted-foreground">Couldn't load {props.path}</p>
+      )}
+    </ArtifactPage>
   );
 }
 
@@ -244,19 +451,26 @@ function DesignBoard(
     readonly canvas: DesignCanvas;
     /** Folder the canvas's screen paths are relative to. */
     readonly root: string;
-    readonly sources: ReadonlyArray<{ readonly root: string; readonly label: string }>;
-    readonly onSelectSource: (root: string) => void;
     readonly warning: string | null;
     readonly onReload: () => void;
+    readonly picker: ReactNode;
   },
 ) {
   const viewKey = `${props.environmentId}:${props.cwd}:${props.root}`;
   const saved = savedViews.get(viewKey);
   const [pageIndex, setPageIndex] = useState(() =>
-    saved && saved.page < props.canvas.pages.length ? saved.page : 0,
+    saved && saved.page < props.canvas.pages.length ? saved.page : (props.canvas.initialPage ?? 0),
   );
   const page = props.canvas.pages[Math.min(pageIndex, props.canvas.pages.length - 1)];
   const layout = useMemo(() => layoutDesignPage(page), [page]);
+  const tokenFiles = useMemo(() => {
+    const files = new Map<string, string>();
+    for (const frame of layout.frames) {
+      const directory = frameDirectory(frame.file);
+      if (!files.has(directory)) files.set(directory, frame.file.split("#", 1)[0]!);
+    }
+    return files;
+  }, [layout.frames]);
 
   const viewportRef = useRef<HTMLDivElement>(null);
   const worldRef = useRef<HTMLDivElement>(null);
@@ -487,132 +701,119 @@ function DesignBoard(
 
   return (
     <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div
-        ref={viewportRef}
-        tabIndex={0}
-        aria-label="Design canvas"
-        data-tiny={tiny ? "" : undefined}
-        className="group/canvas relative min-h-0 flex-1 cursor-grab touch-none overflow-hidden bg-muted/40 outline-none select-none active:cursor-grabbing"
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerEnd}
-        onPointerCancel={onPointerEnd}
-        onDoubleClick={onDoubleClick}
-        onKeyDown={onKeyDown}
-        style={{ backgroundImage: "radial-gradient(var(--color-border) 1px, transparent 1px)" }}
-      >
-        <div ref={worldRef} className="absolute top-0 left-0 origin-top-left will-change-transform">
-          {layout.headings.map((heading) => (
-            <h2
-              key={heading.key}
-              className="absolute m-0 font-bold tracking-tight whitespace-nowrap text-foreground"
-              style={{ left: heading.x, top: heading.y, fontSize: HEADING_SIZE, lineHeight: 1 }}
-            >
-              {heading.title}
-            </h2>
-          ))}
-          {layout.frames.map((frame) => (
-            <DesignFrameView
-              key={frame.key}
-              frame={frame}
-              root={props.root}
-              environmentId={props.environmentId}
-              cwd={props.cwd}
-              threadRef={props.threadRef}
-              draft={props.draft}
-              designRevision={props.designRevision}
-              live={frame.key === liveKey}
-              selected={frame.key === selectedKey}
-              onOpenFile={props.onOpenFile}
-              onZoomTo={zoomToFrame}
-            />
-          ))}
-        </div>
-      </div>
-
-      <div className="pointer-events-none absolute inset-x-2 top-2 flex items-start justify-between gap-2">
-        <div className="pointer-events-auto flex min-w-0 items-center gap-1 rounded-lg border bg-popover p-1 shadow-sm">
-          {props.sources.length > 1 ? (
-            <Select
-              value={props.root}
-              onValueChange={(value) => value && props.onSelectSource(value)}
-            >
-              <SelectTrigger size="sm" variant="ghost" aria-label="Canvas" className="w-auto">
-                <SelectValue>
-                  {props.canvas.title ??
-                    props.sources.find((source) => source.root === props.root)?.label}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup alignItemWithTrigger={false}>
-                {props.sources.map((source) => (
-                  <SelectItem key={source.root} hideIndicator value={source.root}>
-                    {source.label}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          ) : props.canvas.title ? (
-            <span className="truncate px-2 text-xs font-medium">{props.canvas.title}</span>
-          ) : null}
-          {props.canvas.pages.length > 1 ? (
-            <Select
-              value={String(pageIndex)}
-              onValueChange={(value) => setPageIndex(Number(value))}
-            >
-              <SelectTrigger size="sm" variant="ghost" aria-label="Canvas page" className="w-auto">
-                <SelectValue>{page?.name}</SelectValue>
-              </SelectTrigger>
-              <SelectPopup alignItemWithTrigger={false}>
-                {props.canvas.pages.map((entry, index) => (
-                  <SelectItem key={`${entry.name}:${index}`} hideIndicator value={String(index)}>
-                    {entry.name}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          ) : !props.canvas.title ? (
-            <span className="truncate px-2 text-xs font-medium">{page?.name}</span>
-          ) : null}
-        </div>
-        <div className="pointer-events-auto flex shrink-0 items-center gap-0.5 rounded-lg border bg-popover p-1 shadow-sm">
-          <ToolbarButton label="Zoom out (−)" onClick={() => zoomBy(0.8)}>
-            <Minus />
-          </ToolbarButton>
-          <Button
-            size="sm"
-            variant="ghost"
-            className="min-w-14"
-            aria-label="Zoom to 100% (0)"
-            onClick={() => zoomBy(1 / (viewRef.current?.zoom ?? 1))}
+      <ArtifactHeader picker={props.picker} onReload={props.onReload} />
+      <div className="relative flex min-h-0 flex-1 flex-col">
+        <div
+          ref={viewportRef}
+          tabIndex={0}
+          aria-label="Design canvas"
+          data-tiny={tiny ? "" : undefined}
+          className="group/canvas relative min-h-0 flex-1 cursor-grab touch-none overflow-hidden bg-muted/40 outline-none select-none active:cursor-grabbing"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerEnd}
+          onPointerCancel={onPointerEnd}
+          onDoubleClick={onDoubleClick}
+          onKeyDown={onKeyDown}
+          style={{ backgroundImage: "radial-gradient(var(--color-border) 1px, transparent 1px)" }}
+        >
+          <div
+            ref={worldRef}
+            className="absolute top-0 left-0 origin-top-left will-change-transform"
           >
-            <span className="tabular-nums">{zoomPercent}%</span>
-          </Button>
-          <ToolbarButton label="Zoom in (+)" onClick={() => zoomBy(1.25)}>
-            <Plus />
-          </ToolbarButton>
-          <ToolbarButton label="Fit everything (1)" onClick={fitAll}>
-            <Maximize />
-          </ToolbarButton>
-          <ToolbarButton label="Reload designs" onClick={props.onReload}>
-            <RefreshIcon />
-          </ToolbarButton>
-        </div>
-      </div>
-
-      {liveFrame || props.warning ? (
-        <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-3">
-          <div className="max-w-full truncate rounded-lg border bg-popover px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
-            {liveFrame ? (
-              <>
-                Using <span className="font-medium text-foreground">{liveFrame.title}</span> · Esc
-                or click outside to return to the canvas
-              </>
-            ) : (
-              props.warning
-            )}
+            {layout.headings.map((heading) => (
+              <h2
+                key={heading.key}
+                className="absolute m-0 font-bold tracking-tight whitespace-nowrap text-foreground"
+                style={{ left: heading.x, top: heading.y, fontSize: HEADING_SIZE, lineHeight: 1 }}
+              >
+                {heading.title}
+              </h2>
+            ))}
+            {layout.frames.map((frame) => (
+              <DesignFrameView
+                key={frame.key}
+                frame={frame}
+                root={props.root}
+                tokenFile={tokenFiles.get(frameDirectory(frame.file)) ?? frame.file}
+                environmentId={props.environmentId}
+                cwd={props.cwd}
+                threadRef={props.threadRef}
+                draft={props.draft}
+                designRevision={props.designRevision}
+                live={frame.key === liveKey}
+                selected={frame.key === selectedKey}
+                onOpenFile={props.onOpenFile}
+                onZoomTo={zoomToFrame}
+              />
+            ))}
           </div>
         </div>
-      ) : null}
+
+        <div className="pointer-events-none absolute inset-x-2 top-2 flex items-start justify-between gap-2">
+          {props.canvas.pages.length > 1 ? (
+            <div className="pointer-events-auto flex min-w-0 items-center gap-1 rounded-lg border bg-popover p-1 shadow-sm">
+              <Select
+                value={String(pageIndex)}
+                onValueChange={(value) => setPageIndex(Number(value))}
+              >
+                <SelectTrigger
+                  size="sm"
+                  variant="ghost"
+                  aria-label="Canvas page"
+                  className="w-auto"
+                >
+                  <SelectValue>{page?.name}</SelectValue>
+                </SelectTrigger>
+                <SelectPopup alignItemWithTrigger={false}>
+                  {props.canvas.pages.map((entry, index) => (
+                    <SelectItem key={`${entry.name}:${index}`} hideIndicator value={String(index)}>
+                      {entry.name}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            </div>
+          ) : (
+            <div />
+          )}
+          <div className="pointer-events-auto flex shrink-0 items-center gap-0.5 rounded-lg border bg-popover p-1 shadow-sm">
+            <ToolbarButton label="Zoom out (−)" onClick={() => zoomBy(0.8)}>
+              <Minus />
+            </ToolbarButton>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="min-w-14"
+              aria-label="Zoom to 100% (0)"
+              onClick={() => zoomBy(1 / (viewRef.current?.zoom ?? 1))}
+            >
+              <span className="tabular-nums">{zoomPercent}%</span>
+            </Button>
+            <ToolbarButton label="Zoom in (+)" onClick={() => zoomBy(1.25)}>
+              <Plus />
+            </ToolbarButton>
+            <ToolbarButton label="Fit everything (1)" onClick={fitAll}>
+              <Maximize />
+            </ToolbarButton>
+          </div>
+        </div>
+
+        {liveFrame || props.warning ? (
+          <div className="pointer-events-none absolute inset-x-0 bottom-3 flex justify-center px-3">
+            <div className="max-w-full truncate rounded-lg border bg-popover px-3 py-1.5 text-xs text-muted-foreground shadow-sm">
+              {liveFrame ? (
+                <>
+                  Using <span className="font-medium text-foreground">{liveFrame.title}</span> · Esc
+                  or click outside to return to the canvas
+                </>
+              ) : (
+                props.warning
+              )}
+            </div>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -636,9 +837,24 @@ function ToolbarButton(props: {
   );
 }
 
+const frameDirectory = (file: string) => {
+  const path = file.split("#", 1)[0]!;
+  return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+};
+
+/** The asset URL for `file`, from one issued for a file in the same folder. */
+function siblingAssetUrl(url: string, file: string): string {
+  const name = file.split("#", 1)[0]!.split("/").pop() ?? "";
+  const query = url.indexOf("?");
+  const path = query === -1 ? url : url.slice(0, query);
+  return `${path.slice(0, path.lastIndexOf("/") + 1)}${encodeURIComponent(name)}${query === -1 ? "" : url.slice(query)}`;
+}
+
 const DesignFrameView = memo(function DesignFrameView(props: {
   readonly frame: PlacedFrame;
   readonly root: string;
+  /** A screen in the same folder whose asset URL this frame borrows. */
+  readonly tokenFile: string;
   readonly environmentId: EnvironmentId;
   readonly cwd: string;
   readonly threadRef: ScopedThreadRef;
@@ -651,6 +867,9 @@ const DesignFrameView = memo(function DesignFrameView(props: {
 }) {
   const { frame } = props;
   const relativePath = `${props.root}/${frame.file.split("#", 1)[0]}`;
+  // An asset URL serves every file beside the one it was issued for, so the
+  // frames in one folder share a single URL (one request, not one per screen).
+  const tokenPath = `${props.root}/${props.tokenFile}`;
   const resource = useMemo(
     () =>
       workspaceAssetResource({
@@ -658,9 +877,12 @@ const DesignFrameView = memo(function DesignFrameView(props: {
         threadRef: props.threadRef,
         draft: props.draft,
         workspaceRoot: props.cwd,
-        absolutePath: resolvePathLinkTarget(relativePath, props.cwd),
+        // Relative, so the URL is scoped to the folder: an absolute draft path
+        // would serve that one file only, and its sibling screens and assets
+        // would not load.
+        absolutePath: tokenPath,
       }),
-    [props.threadRef, props.draft, props.cwd, relativePath],
+    [props.threadRef, props.draft, props.cwd, tokenPath],
   );
   const assetUrl = useAssetUrlState(props.environmentId, resource);
   // Keep one URL per revision: a re-minted token alone must not reload the screen.
@@ -673,7 +895,11 @@ const DesignFrameView = memo(function DesignFrameView(props: {
         ? current
         : {
             revision: props.designRevision,
-            url: screenFrameSrc(liveUrl, frame.file, props.designRevision),
+            url: screenFrameSrc(
+              siblingAssetUrl(liveUrl, frame.file),
+              frame.file,
+              props.designRevision,
+            ),
           },
     );
   }, [liveUrl, frame.file, props.designRevision]);
@@ -731,6 +957,7 @@ const DesignFrameView = memo(function DesignFrameView(props: {
             src={src.url}
             title={frame.title}
             sandbox="allow-scripts allow-forms allow-popups allow-downloads"
+            loading="lazy"
             scrolling={frame.scroll ? "auto" : "no"}
             className={cn(
               "block size-full border-0 bg-white",

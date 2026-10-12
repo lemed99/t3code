@@ -37,6 +37,8 @@ export interface DesignPage {
 export interface DesignCanvas {
   readonly title: string | null;
   readonly pages: ReadonlyArray<DesignPage>;
+  /** Page to open first, when the canvas names one. */
+  readonly initialPage?: number;
 }
 
 export type DesignManifestResult =
@@ -261,7 +263,10 @@ export function fitViewToRect(
 ): CanvasView {
   const usableHeight = Math.max(1, viewport.height - viewport.top - padding * 2);
   const usableWidth = Math.max(1, viewport.width - padding * 2);
-  const zoom = clampZoom(Math.min(usableWidth / rect.width, usableHeight / rect.height, 1));
+  const widthZoom = Math.min(usableWidth / rect.width, 1);
+  // Very tall content (long pages, tall columns of screens) would shrink to a
+  // sliver; stay at least half as large as fitting the width, and scroll down.
+  const zoom = clampZoom(Math.max(Math.min(widthZoom, usableHeight / rect.height), widthZoom / 2));
   return {
     zoom,
     x: (viewport.width - rect.width * zoom) / 2 - rect.x * zoom,
@@ -292,7 +297,7 @@ export function screenFrameSrc(
 
 // `design/` as a path segment: at the start, after a separator, or after the
 // space, quote or `=` that begins a path in a shell command.
-const DESIGN_PATH_PATTERN = /(^|[\s"'=\\/])design[\\/]/;
+const DESIGN_PATH_PATTERN = /(^|[\s"'=\\/])(design|artifacts)[\\/]/;
 
 interface TurnItemLike {
   readonly id: string;
@@ -406,10 +411,17 @@ export function parseClaudeDesignCanvas(contents: string | null): DesignManifest
     const id = isRecord(page) ? readString(page.id) : null;
     return id === null ? [] : [{ id, name: (isRecord(page) && readString(page.name)) || id }];
   });
-  if (pageDefs.length === 0) pageDefs.push({ id: "", name: readString(raw.title) ?? "Page 1" });
+  // Artboards with no page of their own get one at the end, so they do not
+  // crowd the first page (a canvas with no pages is all one page).
+  const UNPAGED = "\u0000unpaged";
+  const hasPages = pageDefs.length > 0;
+  pageDefs.push({
+    id: UNPAGED,
+    name: hasPages ? "Other screens" : (readString(raw.title) ?? "Page 1"),
+  });
   const pageOf = (value: Record<string, unknown>) => {
     const page = readString(value.page);
-    return pageDefs.some((entry) => entry.id === page) ? page : pageDefs[0]!.id;
+    return pageDefs.some((entry) => entry.id === page) ? page : UNPAGED;
   };
   const order = (Array.isArray(raw.order) ? raw.order : []).filter(
     (file): file is string => typeof file === "string" && file in boards,
@@ -445,8 +457,14 @@ export function parseClaudeDesignCanvas(contents: string | null): DesignManifest
       const y = readCoordinate(note.y);
       return title === null || x === null || y === null ? [] : [{ key: `note:${id}`, title, x, y }];
     });
-    const minX = Math.min(...frames.map((frame) => frame.x), ...headings.map((h) => h.x), 0);
-    const minY = Math.min(...frames.map((frame) => frame.y), ...headings.map((h) => h.y), 0);
+    const minX =
+      frames.length > 0
+        ? Math.min(...frames.map((frame) => frame.x), ...headings.map((h) => h.x))
+        : 0;
+    const minY =
+      frames.length > 0
+        ? Math.min(...frames.map((frame) => frame.y), ...headings.map((h) => h.y))
+        : 0;
     const placedFrames = frames.map((frame) => ({
       ...frame,
       x: frame.x - minX,
@@ -468,11 +486,16 @@ export function parseClaudeDesignCanvas(contents: string | null): DesignManifest
       },
     };
   });
+  const shown = pages.filter((page) => page.sections[0]!.frames.length > 0);
+  const launchPage = isRecord(raw.launch) ? readString(raw.launch.page) : null;
+  const launchName = pageDefs.find((entry) => entry.id === launchPage)?.name;
+  const initialPage = shown.findIndex((page) => page.name === launchName);
   return {
     _tag: "Valid",
     canvas: {
       title: readString(raw.title),
-      pages: pages.filter((page) => page.sections[0]!.frames.length > 0),
+      pages: shown,
+      ...(initialPage > 0 ? { initialPage } : {}),
     },
   };
 }

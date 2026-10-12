@@ -8,23 +8,26 @@ Agents can place local images in a page by file path. T3 Code embeds them when t
 
 Before publishing, agents check their work with screenshots from a small headless browser that T3 Code keeps for itself; it never uses a browser you installed. The first preview on a machine downloads it once (about 120 MB) into T3 Code's data folder, so that preview can take a minute. Browser tabs on a remote environment use the same browser, so whichever comes first downloads it. Some Linux hosts need [setup](remote-access.md#browser-host-setup) before it can start. Pages publish without it.
 
-## Design canvas
+## Artifacts
 
-Ask an agent to design screens ("design the onboarding flow", "mock up the settings page") and it
-puts them on the project's design canvas. Open **Design canvas** from the right panel (**C** in an
-empty panel); after a turn that changed designs it opens on its own when proactive panels are on.
-Maximize the panel to give the canvas the whole window.
+Ask an agent for something to look at or keep ("design the onboarding flow", "write the launch
+plan", "make a budget sheet") and it saves it as an artifact in the project. Open **Artifacts**
+from the right panel (**A** in an empty panel); after a turn that changed an artifact it opens on
+its own when proactive panels are on. The menu at the top left switches between artifacts.
 
-Drag or scroll to move around, and pinch or hold ⌘/Ctrl while scrolling to zoom. **1** fits
-everything and **0** goes to 100%. Double-click a screen to click around in it, and press Esc to
-return to the canvas. The file button beside a screen's name opens its HTML in the file viewer.
-Projects with several pages of designs show a page menu at the top left.
+- **Designs** show on a canvas. Drag or scroll to move around, and pinch or hold ⌘/Ctrl while
+  scrolling to zoom. **1** fits everything and **0** goes to 100%. Double-click a screen to click
+  around in it, and press Esc to return. Designs with several pages show a page menu.
+- **Documents** (Markdown) read as formatted pages.
+- **Sheets** (CSV or TSV) show as a table.
 
-Designs live in the project, so every account and every provider working on it shares them: each
-screen is an HTML file in `design/screens/`, and `design/canvas.json` lists them in sections and
-pages with their sizes. A screen file that the list leaves out still appears, under **Not on the
-canvas yet**. The canvas reloads screens after the agent changes them; use the reload button after
-editing them some other way. The canvas is not available on mobile.
+Artifacts live in the project, so every account and every provider working on it shares them. Each
+one is a folder in `artifacts/`: a design is HTML screens listed in its `canvas.json`, a document is
+`document.md`, a sheet is a `.csv` file. `artifacts/index.json` holds their titles and dates.
+Canvases copied from Claude Design (a `canvas.json` beside `.dc.html` screens and their
+`support.js`) show with their original layout, and the older `design/` folder still appears as
+**Project designs**. Use the reload button after changing files some other way. Artifacts are not
+available on mobile.
 
 ## MCP apps
 
