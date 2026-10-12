@@ -30,6 +30,8 @@ export interface DesignSection {
 export interface DesignPage {
   readonly name: string;
   readonly sections: ReadonlyArray<DesignSection>;
+  /** Positions fixed by the canvas file itself (Claude Design canvases). */
+  readonly placed?: DesignLayout;
 }
 
 export interface DesignCanvas {
@@ -201,6 +203,7 @@ export interface DesignLayout {
 
 /** Sections stack top to bottom; a section's frames sit in rows that wrap. */
 export function layoutDesignPage(page: DesignPage | undefined): DesignLayout {
+  if (page?.placed) return page.placed;
   const frames: PlacedFrame[] = [];
   const headings: PlacedHeading[] = [];
   let y = 0;
@@ -343,4 +346,133 @@ export function designChangesOfItems(items: ReadonlyArray<TurnItemLike>): {
     if (item.runId !== null) runIds.add(item.runId);
   }
   return { revision, runIds };
+}
+
+/**
+ * A canvas made in Claude Design and copied into the project: a folder holding
+ * `canvas.json` (version 3) and its `.dc.html` screens. Screens render with the
+ * folder's own `support.js` viewer.
+ */
+export interface ClaudeDesignCanvasSource {
+  /** Folder of `canvas.json`, relative to the project. */
+  readonly root: string;
+  readonly label: string;
+}
+
+/** Folders whose `canvas.json` sits next to Claude Design screens. */
+export function findClaudeDesignCanvases(
+  paths: ReadonlyArray<string>,
+): ReadonlyArray<ClaudeDesignCanvasSource> {
+  const dirname = (path: string) =>
+    path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  const screenFolders = new Set(paths.filter((path) => /\.dc\.html$/i.test(path)).map(dirname));
+  return paths
+    .filter((path) => path === "canvas.json" || path.endsWith("/canvas.json"))
+    .map(dirname)
+    .filter((root) => root !== DESIGN_DIRECTORY && screenFolders.has(root))
+    .map((root) => {
+      const segments = root.split("/").filter(Boolean);
+      const last = segments.at(-1) ?? "Canvas";
+      const label = last === "project" && segments.length > 1 ? segments.at(-2)! : last;
+      return { root, label };
+    })
+    .toSorted((left, right) => left.label.localeCompare(right.label));
+}
+
+const readCoordinate = (value: unknown): number | null =>
+  typeof value === "number" && Number.isFinite(value) ? value : null;
+
+/**
+ * Reads a Claude Design `canvas.json`: artboards keyed by file with fixed
+ * positions, optional pages, and `title1` notes as section headings. Positions
+ * are kept as drawn, shifted so the page starts at the origin.
+ */
+export function parseClaudeDesignCanvas(contents: string | null): DesignManifestResult {
+  if (contents === null) return { _tag: "Missing" };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(contents);
+  } catch (error) {
+    return {
+      _tag: "Invalid",
+      message: `canvas.json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  if (!isRecord(raw) || !isRecord(raw.boards)) {
+    return { _tag: "Invalid", message: "This canvas.json has no artboards." };
+  }
+  const boards = raw.boards;
+  const pageDefs = (Array.isArray(raw.pages) ? raw.pages : []).flatMap((page) => {
+    const id = isRecord(page) ? readString(page.id) : null;
+    return id === null ? [] : [{ id, name: (isRecord(page) && readString(page.name)) || id }];
+  });
+  if (pageDefs.length === 0) pageDefs.push({ id: "", name: readString(raw.title) ?? "Page 1" });
+  const pageOf = (value: Record<string, unknown>) => {
+    const page = readString(value.page);
+    return pageDefs.some((entry) => entry.id === page) ? page : pageDefs[0]!.id;
+  };
+  const order = (Array.isArray(raw.order) ? raw.order : []).filter(
+    (file): file is string => typeof file === "string" && file in boards,
+  );
+  const files = [...order, ...Object.keys(boards).filter((file) => !order.includes(file))];
+  const notes = isRecord(raw.notes) ? Object.entries(raw.notes) : [];
+
+  const pages = pageDefs.map((pageDef): DesignPage => {
+    const frames = files.flatMap((rawFile): PlacedFrame[] => {
+      const board = boards[rawFile];
+      const file = normalizeScreenFile(rawFile);
+      if (!isRecord(board) || file === null || pageOf(board) !== pageDef.id) return [];
+      const x = readCoordinate(board.x);
+      const y = readCoordinate(board.y);
+      if (x === null || y === null) return [];
+      return [
+        {
+          key: `${pageDef.id}:${file}`,
+          file,
+          title: readString(board.title) ?? screenTitleFromFile(file.replace(/\.dc\.html$/i, "")),
+          width: readSize(board.w, DEFAULT_FRAME_WIDTH),
+          height: readSize(board.h, DEFAULT_FRAME_HEIGHT),
+          scroll: false,
+          x,
+          y,
+        },
+      ];
+    });
+    const headings = notes.flatMap(([id, note]): PlacedHeading[] => {
+      if (!isRecord(note) || note.kind !== "title1" || pageOf(note) !== pageDef.id) return [];
+      const title = readString(note.text);
+      const x = readCoordinate(note.x);
+      const y = readCoordinate(note.y);
+      return title === null || x === null || y === null ? [] : [{ key: `note:${id}`, title, x, y }];
+    });
+    const minX = Math.min(...frames.map((frame) => frame.x), ...headings.map((h) => h.x), 0);
+    const minY = Math.min(...frames.map((frame) => frame.y), ...headings.map((h) => h.y), 0);
+    const placedFrames = frames.map((frame) => ({
+      ...frame,
+      x: frame.x - minX,
+      y: frame.y - minY,
+    }));
+    const placedHeadings = headings.map((h) => ({ ...h, x: h.x - minX, y: h.y - minY }));
+    return {
+      name: pageDef.name,
+      sections: [{ title: null, frames: placedFrames }],
+      placed: {
+        frames: placedFrames,
+        headings: placedHeadings,
+        width: Math.max(1, ...placedFrames.map((frame) => frame.x + frame.width)),
+        height: Math.max(
+          1,
+          ...placedFrames.map((frame) => frame.y + frame.height),
+          ...placedHeadings.map((h) => h.y + HEADING_SIZE),
+        ),
+      },
+    };
+  });
+  return {
+    _tag: "Valid",
+    canvas: {
+      title: readString(raw.title),
+      pages: pages.filter((page) => page.sections[0]!.frames.length > 0),
+    },
+  };
 }

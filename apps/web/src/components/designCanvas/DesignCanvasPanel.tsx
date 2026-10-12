@@ -32,6 +32,7 @@ import { Spinner } from "~/components/ui/spinner";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
+import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
 
 import { workspaceAssetResource } from "../files/filePreviewMode";
@@ -42,10 +43,13 @@ import {
   DESIGN_MANIFEST_PATH,
   DESIGN_SCREENS_DIRECTORY,
   type DesignCanvas,
+  type DesignManifestResult,
   HEADING_SIZE,
   type PlacedFrame,
+  findClaudeDesignCanvases,
   fitViewToRect,
   layoutDesignPage,
+  parseClaudeDesignCanvas,
   parseDesignManifest,
   screenFrameSrc,
   wheelZoomFactor,
@@ -65,6 +69,8 @@ const viewportSize = (viewport: HTMLElement | null) => ({
 
 // Views survive the panel unmounting while another tab is shown.
 const savedViews = new Map<string, { page: number; view: CanvasView }>();
+// The canvas last shown per project, when it has several.
+const savedSources = new Map<string, string>();
 
 export interface DesignCanvasPanelProps {
   readonly environmentId: EnvironmentId;
@@ -85,12 +91,74 @@ export interface DesignCanvasPanelProps {
 export default function DesignCanvasPanel(props: DesignCanvasPanelProps) {
   const manifest = useProjectFileQuery(props.environmentId, props.cwd, DESIGN_MANIFEST_PATH);
   const screens = useProjectEntriesQuery(props.environmentId, props.cwd, DESIGN_SCREENS_DIRECTORY);
+  // Canvases copied from Claude Design live anywhere in the project.
+  const projectEntries = useProjectEntriesQuery(props.environmentId, props.cwd);
+  const claudeCanvases = useMemo(
+    () => findClaudeDesignCanvases((projectEntries.data?.entries ?? []).map((entry) => entry.path)),
+    [projectEntries.data?.entries],
+  );
+  const [chosenRoot, setChosenRoot] = useState<string | null>(
+    () => savedSources.get(`${props.environmentId}:${props.cwd}`) ?? null,
+  );
+  const chooseRoot = useCallback(
+    (root: string) => {
+      savedSources.set(`${props.environmentId}:${props.cwd}`, root);
+      setChosenRoot(root);
+    },
+    [props.environmentId, props.cwd],
+  );
+
+  const parsed = useMemo(
+    () => parseDesignManifest(manifest.data?.contents ?? null),
+    [manifest.data?.contents],
+  );
+  const screenFiles = useMemo(
+    () =>
+      (screens.data?.entries ?? [])
+        .filter((entry) => entry.kind === "file")
+        .map((entry) => entry.path.slice(DESIGN_DIRECTORY.length + 1)),
+    [screens.data?.entries],
+  );
+  const projectCanvas = useMemo<DesignCanvas>(
+    () =>
+      withUnlistedScreens(
+        parsed._tag === "Valid" ? parsed.canvas : { title: null, pages: [] },
+        screenFiles,
+      ),
+    [parsed, screenFiles],
+  );
+  const projectHasFrames = projectCanvas.pages.some((page) =>
+    page.sections.some((section) => section.frames.length > 0),
+  );
+  const root =
+    chosenRoot !== null &&
+    (chosenRoot === DESIGN_DIRECTORY || claudeCanvases.some((entry) => entry.root === chosenRoot))
+      ? chosenRoot
+      : projectHasFrames || claudeCanvases.length === 0
+        ? DESIGN_DIRECTORY
+        : claudeCanvases[0]!.root;
+  const isClaudeCanvas = root !== DESIGN_DIRECTORY;
+  const claudeManifest = useProjectFileQuery(
+    props.environmentId,
+    props.cwd,
+    isClaudeCanvas ? `${root}/canvas.json` : null,
+    isClaudeCanvas,
+  );
+  const claudeParsed = useMemo<DesignManifestResult>(
+    () => parseClaudeDesignCanvas(claudeManifest.data?.contents ?? null),
+    [claudeManifest.data?.contents],
+  );
+
   const refreshManifest = manifest.refresh;
   const refreshScreens = screens.refresh;
+  const refreshEntries = projectEntries.refresh;
+  const refreshClaudeManifest = claudeManifest.refresh;
   const refresh = useCallback(() => {
     refreshManifest();
     refreshScreens();
-  }, [refreshManifest, refreshScreens]);
+    refreshEntries();
+    refreshClaudeManifest();
+  }, [refreshManifest, refreshScreens, refreshEntries, refreshClaudeManifest]);
   useWorkspaceMutationRefresh({
     mutationId: props.designRevision,
     refresh,
@@ -106,32 +174,31 @@ export default function DesignCanvasPanel(props: DesignCanvasPanelProps) {
     setManualReloads((count) => count + 1);
   }, [refresh]);
 
-  const parsed = useMemo(
-    () => parseDesignManifest(manifest.data?.contents ?? null),
-    [manifest.data?.contents],
+  const sources = useMemo(
+    () => [
+      ...(projectHasFrames || claudeCanvases.length === 0
+        ? [{ root: DESIGN_DIRECTORY, label: "Project designs" }]
+        : []),
+      ...claudeCanvases,
+    ],
+    [projectHasFrames, claudeCanvases],
   );
-  const screenFiles = useMemo(
-    () =>
-      (screens.data?.entries ?? [])
-        .filter((entry) => entry.kind === "file")
-        .map((entry) => entry.path.slice(DESIGN_DIRECTORY.length + 1)),
-    [screens.data?.entries],
-  );
-  const canvas = useMemo<DesignCanvas>(
-    () =>
-      withUnlistedScreens(
-        parsed._tag === "Valid" ? parsed.canvas : { title: null, pages: [] },
-        screenFiles,
-      ),
-    [parsed, screenFiles],
-  );
+  const activeParsed = isClaudeCanvas ? claudeParsed : parsed;
+  const canvas: DesignCanvas = isClaudeCanvas
+    ? claudeParsed._tag === "Valid"
+      ? claudeParsed.canvas
+      : { title: null, pages: [] }
+    : projectCanvas;
   const frameCount = canvas.pages.reduce(
     (count, page) => count + page.sections.reduce((sum, section) => sum + section.frames.length, 0),
     0,
   );
 
   if (frameCount === 0) {
-    if (manifest.isPending || screens.isPending) {
+    const loading = isClaudeCanvas
+      ? claudeManifest.isPending
+      : manifest.isPending || screens.isPending || projectEntries.isPending;
+    if (loading) {
       return (
         <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
           <Spinner size="lg" />
@@ -145,11 +212,11 @@ export default function DesignCanvasPanel(props: DesignCanvasPanelProps) {
             <Frame />
           </EmptyMedia>
           <EmptyTitle>
-            {parsed._tag === "Invalid" ? "The canvas can't be read" : "No designs yet"}
+            {activeParsed._tag === "Invalid" ? "The canvas can't be read" : "No designs yet"}
           </EmptyTitle>
           <EmptyDescription>
-            {parsed._tag === "Invalid"
-              ? `${parsed.message} Ask the agent to fix design/canvas.json.`
+            {activeParsed._tag === "Invalid"
+              ? `${activeParsed.message} Ask the agent to fix ${root}/canvas.json.`
               : "Ask the agent to design a screen. Designs are HTML files in design/screens, and they appear here as the agent makes them."}
           </EmptyDescription>
         </EmptyHeader>
@@ -159,11 +226,15 @@ export default function DesignCanvasPanel(props: DesignCanvasPanelProps) {
 
   return (
     <DesignBoard
+      key={root}
       {...props}
       designRevision={designRevision}
       onReload={reload}
       canvas={canvas}
-      warning={parsed._tag === "Invalid" ? parsed.message : null}
+      root={root}
+      sources={sources}
+      onSelectSource={chooseRoot}
+      warning={activeParsed._tag === "Invalid" ? activeParsed.message : null}
     />
   );
 }
@@ -171,11 +242,15 @@ export default function DesignCanvasPanel(props: DesignCanvasPanelProps) {
 function DesignBoard(
   props: DesignCanvasPanelProps & {
     readonly canvas: DesignCanvas;
+    /** Folder the canvas's screen paths are relative to. */
+    readonly root: string;
+    readonly sources: ReadonlyArray<{ readonly root: string; readonly label: string }>;
+    readonly onSelectSource: (root: string) => void;
     readonly warning: string | null;
     readonly onReload: () => void;
   },
 ) {
-  const viewKey = `${props.environmentId}:${props.cwd}`;
+  const viewKey = `${props.environmentId}:${props.cwd}:${props.root}`;
   const saved = savedViews.get(viewKey);
   const [pageIndex, setPageIndex] = useState(() =>
     saved && saved.page < props.canvas.pages.length ? saved.page : 0,
@@ -275,11 +350,9 @@ function DesignBoard(
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
-    const observer = new ResizeObserver(() => {
+    return observeResize(viewport, () => {
       if (autoFitRef.current) fitAll();
     });
-    observer.observe(viewport);
-    return () => observer.disconnect();
   }, [fitAll]);
 
   // Wheel needs a non-passive listener to keep the page from scrolling.
@@ -442,6 +515,7 @@ function DesignBoard(
             <DesignFrameView
               key={frame.key}
               frame={frame}
+              root={props.root}
               environmentId={props.environmentId}
               cwd={props.cwd}
               threadRef={props.threadRef}
@@ -458,7 +532,26 @@ function DesignBoard(
 
       <div className="pointer-events-none absolute inset-x-2 top-2 flex items-start justify-between gap-2">
         <div className="pointer-events-auto flex min-w-0 items-center gap-1 rounded-lg border bg-popover p-1 shadow-sm">
-          {props.canvas.title ? (
+          {props.sources.length > 1 ? (
+            <Select
+              value={props.root}
+              onValueChange={(value) => value && props.onSelectSource(value)}
+            >
+              <SelectTrigger size="sm" variant="ghost" aria-label="Canvas" className="w-auto">
+                <SelectValue>
+                  {props.canvas.title ??
+                    props.sources.find((source) => source.root === props.root)?.label}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup alignItemWithTrigger={false}>
+                {props.sources.map((source) => (
+                  <SelectItem key={source.root} hideIndicator value={source.root}>
+                    {source.label}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          ) : props.canvas.title ? (
             <span className="truncate px-2 text-xs font-medium">{props.canvas.title}</span>
           ) : null}
           {props.canvas.pages.length > 1 ? (
@@ -545,6 +638,7 @@ function ToolbarButton(props: {
 
 const DesignFrameView = memo(function DesignFrameView(props: {
   readonly frame: PlacedFrame;
+  readonly root: string;
   readonly environmentId: EnvironmentId;
   readonly cwd: string;
   readonly threadRef: ScopedThreadRef;
@@ -556,7 +650,7 @@ const DesignFrameView = memo(function DesignFrameView(props: {
   readonly onZoomTo: (frame: PlacedFrame) => void;
 }) {
   const { frame } = props;
-  const relativePath = `${DESIGN_DIRECTORY}/${frame.file.split("#", 1)[0]}`;
+  const relativePath = `${props.root}/${frame.file.split("#", 1)[0]}`;
   const resource = useMemo(
     () =>
       workspaceAssetResource({

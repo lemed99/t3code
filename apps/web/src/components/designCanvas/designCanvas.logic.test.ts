@@ -9,9 +9,11 @@ import {
   SECTION_GAP,
   UNLISTED_SECTION_TITLE,
   designChangesOfItems,
+  findClaudeDesignCanvases,
   fitViewToRect,
   layoutDesignPage,
   normalizeScreenFile,
+  parseClaudeDesignCanvas,
   parseDesignManifest,
   screenFrameSrc,
   wheelZoomFactor,
@@ -258,5 +260,55 @@ describe("designChangesOfItems", () => {
     ]);
     expect(changes.revision).toBe("3");
     expect([...changes.runIds]).toEqual(["run-a", "run-b"]);
+  });
+});
+
+describe("Claude Design canvases", () => {
+  it("finds canvas folders next to their screens", () => {
+    expect(
+      findClaudeDesignCanvases([
+        "design/canvas.json",
+        "design/screens/a.dc.html",
+        "artifacts/venna-website/project/canvas.json",
+        "artifacts/venna-website/project/Main.dc.html",
+        "notes/canvas.json",
+      ]),
+    ).toEqual([{ root: "artifacts/venna-website/project", label: "venna-website" }]);
+  });
+
+  it("keeps artboard positions per page and shifts them to the origin", () => {
+    const result = parseClaudeDesignCanvas(
+      JSON.stringify({
+        v: 3,
+        title: "Venna · Website",
+        pages: [
+          { id: "site", name: "getvenna.com" },
+          { id: "empty", name: "Nothing here" },
+        ],
+        boards: {
+          "Main.dc.html": { x: 0, y: 0, w: 1440, h: 900, page: "site", title: "Home" },
+          "Other.dc.html": { x: 1560, y: 0, w: 390, h: 844 },
+          "../escape.dc.html": { x: 0, y: 0, w: 10, h: 10 },
+        },
+        order: ["Other.dc.html", "Main.dc.html"],
+        notes: { top: { kind: "title1", text: "Landing", x: 0, y: -300, page: "site" } },
+      }),
+    );
+    expect(result._tag).toBe("Valid");
+    const canvas = result._tag === "Valid" ? result.canvas : null;
+    expect(canvas?.title).toBe("Venna · Website");
+    expect(canvas?.pages.map((page) => page.name)).toEqual(["getvenna.com"]);
+    const layout = layoutDesignPage(canvas?.pages[0]);
+    expect(layout.headings).toEqual([{ key: "note:top", title: "Landing", x: 0, y: 0 }]);
+    expect(layout.frames.map(({ file, title, x, y }) => ({ file, title, x, y }))).toEqual([
+      { file: "Other.dc.html", title: "Other", x: 1560, y: 300 },
+      { file: "Main.dc.html", title: "Home", x: 0, y: 300 },
+    ]);
+    expect(layout.width).toBe(1950);
+    expect(layout.height).toBe(1200);
+  });
+
+  it("rejects files that are not Claude Design canvases", () => {
+    expect(parseClaudeDesignCanvas(JSON.stringify({ pages: [] }))._tag).toBe("Invalid");
   });
 });
