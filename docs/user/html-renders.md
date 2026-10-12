@@ -18,6 +18,10 @@ its own when proactive panels are on. The menu at the top left switches between 
 - **Designs** show on a canvas. Drag or scroll to move around, and pinch or hold ⌘/Ctrl while
   scrolling to zoom. **1** fits everything and **0** goes to 100%. Double-click a screen to click
   around in it, and press Esc to return. Designs with several pages show a page menu.
+- **Web pages** (a folder with an `index.html`) open full size and work like a page in a browser.
+- **Design systems** (a `tokens.json` with a `README.md` and `components/`, as copied from Claude
+  Design) show their guide, colors, type, spacing, radius, shadows and component previews, with a
+  theme menu when the tokens have themes.
 - **Documents** (Markdown) read as formatted pages.
 - **Sheets** (CSV or TSV) show as a table.
 

@@ -2,8 +2,9 @@
  * A project's artifacts: the designs, documents and sheets the user keeps
  * beside the code. Each folder in `artifacts/` (or loose file there) is one
  * artifact; `design/` is the project's own design canvas. What a folder holds
- * decides how it shows: designs on the canvas, documents rendered, sheets as
- * a table.
+ * decides how it shows: designs on the canvas, a web page (`index.html`) to
+ * browse, a design system's tokens and components, documents rendered, sheets
+ * as a table.
  */
 
 import { DESIGN_DIRECTORY, DESIGN_MANIFEST_PATH } from "./designCanvas.logic";
@@ -12,7 +13,7 @@ export const ARTIFACTS_DIRECTORY = "artifacts";
 export const ARTIFACTS_INDEX_PATH = `${ARTIFACTS_DIRECTORY}/index.json`;
 export const PROJECT_DESIGNS_ID = DESIGN_DIRECTORY;
 
-export type ArtifactKind = "design" | "doc" | "sheet";
+export type ArtifactKind = "design" | "page" | "system" | "doc" | "sheet";
 
 export type ArtifactContent =
   /** A T3 Code canvas: `canvas.json` listing HTML screens, paths relative to `root`. */
@@ -21,6 +22,10 @@ export type ArtifactContent =
   | { readonly _tag: "ClaudeCanvas"; readonly root: string }
   /** HTML screens with no canvas file, shown side by side; paths relative to `root`. */
   | { readonly _tag: "Screens"; readonly root: string; readonly files: ReadonlyArray<string> }
+  /** A web page or small app to browse and use, not a design to look over. */
+  | { readonly _tag: "Page"; readonly path: string }
+  /** A design system: `tokens.json`, `README.md` and `components/` in `root`. */
+  | { readonly _tag: "DesignSystem"; readonly root: string }
   | { readonly _tag: "Document"; readonly path: string }
   | { readonly _tag: "Sheet"; readonly path: string; readonly delimiter: "," | "\t" };
 
@@ -115,6 +120,20 @@ function folderContent(folder: string, files: ReadonlyArray<string>): ArtifactCo
     return { _tag: "ClaudeCanvas", root: dir ? `${folder}/${dir}` : folder };
   }
   if (inside.includes("canvas.json")) return { _tag: "ProjectCanvas", root: folder };
+  const tokensFile = inside.find((path) => {
+    if (path !== "tokens.json" && !path.endsWith("/tokens.json")) return false;
+    const dir = path.slice(0, path.length - "tokens.json".length);
+    return (
+      inside.includes(`${dir}README.md`) &&
+      (inside.includes(`${dir}design-system.json`) ||
+        inside.some((other) => other.startsWith(`${dir}components/`)))
+    );
+  });
+  if (tokensFile !== undefined) {
+    const dir = tokensFile.slice(0, Math.max(0, tokensFile.length - "/tokens.json".length));
+    return { _tag: "DesignSystem", root: dir ? `${folder}/${dir}` : folder };
+  }
+  if (inside.includes("index.html")) return { _tag: "Page", path: `${folder}/index.html` };
   const screens = inside
     .filter((path) => HTML_FILE.test(path))
     .toSorted((left, right) => left.localeCompare(right));
@@ -125,8 +144,16 @@ function folderContent(folder: string, files: ReadonlyArray<string>): ArtifactCo
   return markdown === undefined ? null : { _tag: "Document", path: `${folder}/${markdown}` };
 }
 
-const kindOf = (content: ArtifactContent): ArtifactKind =>
-  content._tag === "Document" ? "doc" : content._tag === "Sheet" ? "sheet" : "design";
+const KIND_OF_CONTENT: Record<ArtifactContent["_tag"], ArtifactKind> = {
+  ProjectCanvas: "design",
+  ClaudeCanvas: "design",
+  Screens: "design",
+  Page: "page",
+  DesignSystem: "system",
+  Document: "doc",
+  Sheet: "sheet",
+};
+const kindOf = (content: ArtifactContent): ArtifactKind => KIND_OF_CONTENT[content._tag];
 
 /**
  * Every artifact in the project, newest first when the index dates them, then
@@ -145,7 +172,7 @@ export function findProjectArtifacts(
     const slash = rest.indexOf("/");
     if (slash === -1) {
       const content = HTML_FILE.test(rest)
-        ? ({ _tag: "Screens", root: ARTIFACTS_DIRECTORY, files: [rest] } as const)
+        ? ({ _tag: "Page", path } as const)
         : SHEET_FILE.test(rest)
           ? sheetContent(path)
           : MARKDOWN_FILE.test(rest) && !IGNORED_NAMES.has(rest)

@@ -17,7 +17,12 @@ const paths = [
   "artifacts/paid-study/document.html",
   "artifacts/year-one/index.html",
   "artifacts/design-system/project/README.md",
+  "artifacts/design-system/project/tokens.json",
   "artifacts/design-system/project/components/Button/preview.html",
+  "artifacts/key-iphone-screens/project/ds/resona/tokens.json",
+  "artifacts/mockups/home.html",
+  "artifacts/mockups/settings.html",
+  "artifacts/calculator.html",
   "artifacts/onboarding/canvas.json",
   "artifacts/onboarding/screens/welcome.html",
   "artifacts/budget/budget.csv",
@@ -61,13 +66,25 @@ describe("findProjectArtifacts", () => {
           content: { _tag: "Sheet", path: "artifacts/budget/budget.csv", delimiter: "," },
         },
         {
+          id: "artifacts/calculator.html",
+          title: "Calculator",
+          kind: "page",
+          content: { _tag: "Page", path: "artifacts/calculator.html" },
+        },
+        {
           id: "artifacts/design-system",
           title: "Design system",
+          kind: "system",
+          content: { _tag: "DesignSystem", root: "artifacts/design-system/project" },
+        },
+        {
+          id: "artifacts/mockups",
+          title: "Mockups",
           kind: "design",
           content: {
             _tag: "Screens",
-            root: "artifacts/design-system",
-            files: ["project/components/Button/preview.html"],
+            root: "artifacts/mockups",
+            files: ["home.html", "settings.html"],
           },
         },
         {
@@ -91,8 +108,8 @@ describe("findProjectArtifacts", () => {
         {
           id: "artifacts/year-one",
           title: "Year one",
-          kind: "design",
-          content: { _tag: "Screens", root: "artifacts/year-one", files: ["index.html"] },
+          kind: "page",
+          content: { _tag: "Page", path: "artifacts/year-one/index.html" },
         },
       ],
     );

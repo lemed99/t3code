@@ -1,6 +1,16 @@
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
-import { FileCode2, FileText, Frame, Maximize, Minus, Palette, Plus, Table2 } from "lucide-react";
+import {
+  FileCode2,
+  FileText,
+  Globe,
+  Maximize,
+  Minus,
+  Palette,
+  Plus,
+  SwatchBook,
+  Table2,
+} from "lucide-react";
 import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
@@ -16,21 +26,12 @@ import {
 import { useAssetUrlState } from "~/assets/assetUrls";
 import { Button } from "~/components/ui/button";
 import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from "~/components/ui/empty";
-import {
   Select,
   SelectItem,
   SelectPopup,
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
-import { Spinner } from "~/components/ui/spinner";
-import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
 import { observeResize } from "~/lib/observeResize";
@@ -63,6 +64,16 @@ import {
   findProjectArtifacts,
   parseArtifactIndex,
 } from "./artifacts.logic";
+import { ArtifactPageView } from "./ArtifactPageView";
+import { DesignSystemView } from "./DesignSystemView";
+import {
+  ArtifactHeader,
+  type ArtifactViewProps,
+  type DesignCanvasPanelProps,
+  PanelEmpty,
+  PanelSpinner,
+  ToolbarButton,
+} from "./artifactChrome";
 
 /** Room for the floating toolbars above the content when fitting. */
 const TOOLBAR_SPACE = 52;
@@ -78,17 +89,6 @@ const viewportSize = (viewport: HTMLElement | null) => ({
 const savedViews = new Map<string, { page: number; view: CanvasView }>();
 // The artifact last shown per project.
 const savedSources = new Map<string, string>();
-
-export interface DesignCanvasPanelProps {
-  readonly environmentId: EnvironmentId;
-  readonly cwd: string;
-  readonly threadRef: ScopedThreadRef;
-  /** The thread is a draft the server does not know yet. */
-  readonly draft: boolean;
-  /** Changes when the agent may have changed design files; reloads the screens. */
-  readonly designRevision: string | null;
-  readonly onOpenFile: (relativePath: string) => void;
-}
 
 /**
  * The project's design canvas: every screen in `design/` as a frame on a
@@ -171,6 +171,10 @@ export default function ArtifactsPanel(props: DesignCanvasPanelProps) {
           warning={null}
         />
       );
+    case "Page":
+      return <ArtifactPageView key={selected.id} {...view} path={selected.content.path} />;
+    case "DesignSystem":
+      return <DesignSystemView key={selected.id} {...view} root={selected.content.root} />;
     case "Document":
       return <ArtifactDocumentView key={selected.id} {...view} path={selected.content.path} />;
     case "Sheet":
@@ -185,12 +189,13 @@ export default function ArtifactsPanel(props: DesignCanvasPanelProps) {
   }
 }
 
-interface ArtifactViewProps extends DesignCanvasPanelProps {
-  readonly onReload: () => void;
-  readonly picker: ReactNode;
-}
-
-const ARTIFACT_ICONS = { design: Palette, doc: FileText, sheet: Table2 } as const;
+const ARTIFACT_ICONS = {
+  design: Palette,
+  page: Globe,
+  system: SwatchBook,
+  doc: FileText,
+  sheet: Table2,
+} as const;
 
 function ArtifactPicker(props: {
   readonly artifacts: ReadonlyArray<ProjectArtifact>;
@@ -220,28 +225,6 @@ function ArtifactPicker(props: {
         })}
       </SelectPopup>
     </Select>
-  );
-}
-
-function PanelSpinner() {
-  return (
-    <div className="flex min-h-0 flex-1 items-center justify-center text-muted-foreground">
-      <Spinner size="lg" />
-    </div>
-  );
-}
-
-function PanelEmpty(props: { readonly title: string; readonly description: string }) {
-  return (
-    <Empty className="min-h-0 flex-1">
-      <EmptyHeader>
-        <EmptyMedia variant="icon">
-          <Frame />
-        </EmptyMedia>
-        <EmptyTitle>{props.title}</EmptyTitle>
-        <EmptyDescription>{props.description}</EmptyDescription>
-      </EmptyHeader>
-    </Empty>
   );
 }
 
@@ -352,35 +335,6 @@ function ClaudeCanvasView(props: ArtifactViewProps & { readonly root: string }) 
   return <DesignBoard {...props} canvas={parsed.canvas} warning={null} />;
 }
 
-function useArtifactFile(props: ArtifactViewProps & { readonly path: string }) {
-  const file = useProjectFileQuery(props.environmentId, props.cwd, props.path);
-  useWorkspaceMutationRefresh({
-    mutationId: props.designRevision,
-    refresh: file.refresh,
-    resourceKey: `${props.environmentId}:${props.cwd}:${props.path}`,
-  });
-  return file;
-}
-
-/** The bar above every artifact: which one is open, and its actions. */
-function ArtifactHeader(props: {
-  readonly picker: ReactNode;
-  readonly onReload: () => void;
-  readonly children?: ReactNode;
-}) {
-  return (
-    <div className="flex shrink-0 items-center justify-between gap-2 border-b px-2 py-1">
-      <div className="flex min-w-0 items-center">{props.picker}</div>
-      <div className="flex shrink-0 items-center gap-0.5">
-        {props.children}
-        <ToolbarButton label="Reload" onClick={props.onReload}>
-          <RefreshIcon />
-        </ToolbarButton>
-      </div>
-    </div>
-  );
-}
-
 /** Documents read like a page: the panel scrolls, the toolbar stays on top. */
 function ArtifactPage(props: {
   readonly picker: ReactNode;
@@ -399,6 +353,16 @@ function ArtifactPage(props: {
       <div className="min-h-0 flex-1 overflow-auto">{props.children}</div>
     </div>
   );
+}
+
+function useArtifactFile(props: ArtifactViewProps & { readonly path: string }) {
+  const file = useProjectFileQuery(props.environmentId, props.cwd, props.path);
+  useWorkspaceMutationRefresh({
+    mutationId: props.designRevision,
+    refresh: file.refresh,
+    resourceKey: `${props.environmentId}:${props.cwd}:${props.path}`,
+  });
+  return file;
 }
 
 function ArtifactDocumentView(props: ArtifactViewProps & { readonly path: string }) {
@@ -815,25 +779,6 @@ function DesignBoard(
         ) : null}
       </div>
     </div>
-  );
-}
-
-function ToolbarButton(props: {
-  readonly label: string;
-  readonly onClick: () => void;
-  readonly children: React.ReactNode;
-}) {
-  return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          <Button size="icon-sm" variant="ghost" aria-label={props.label} onClick={props.onClick} />
-        }
-      >
-        {props.children}
-      </TooltipTrigger>
-      <TooltipPopup>{props.label}</TooltipPopup>
-    </Tooltip>
   );
 }
 
