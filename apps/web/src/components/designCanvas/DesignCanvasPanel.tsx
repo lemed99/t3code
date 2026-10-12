@@ -50,6 +50,7 @@ import {
   type PlacedFrame,
   fitViewToRect,
   layoutDesignPage,
+  liveFrameKeys,
   parseClaudeDesignCanvas,
   parseDesignManifest,
   screenFrameSrc,
@@ -437,11 +438,45 @@ function DesignBoard(
   }, [layout.frames]);
 
   const viewportRef = useRef<HTMLDivElement>(null);
+  // Screens run as live pages only while on screen and big enough to see.
+  const [liveKeys, setLiveKeys] = useState<ReadonlySet<string>>(() => new Set());
+  const liveKeysRef = useRef(liveKeys);
+  const liveFrameRequest = useRef(0);
+  const refreshLiveRef = useRef<() => void>(() => {});
   const worldRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<CanvasView | null>(saved?.view ?? null);
   const [zoomPercent, setZoomPercent] = useState(100);
   const [tiny, setTiny] = useState(false);
   const [liveKey, setLiveKey] = useState<string | null>(null);
+  useEffect(() => {
+    refreshLiveRef.current = () => {
+      if (liveFrameRequest.current) return;
+      liveFrameRequest.current = requestAnimationFrame(() => {
+        liveFrameRequest.current = 0;
+        const view = viewRef.current;
+        if (!view) return;
+        const next = liveFrameKeys(
+          layout.frames,
+          view,
+          viewportSize(viewportRef.current),
+          liveKeysRef.current,
+          liveKey,
+        );
+        const current = liveKeysRef.current;
+        if (next.size === current.size && [...next].every((key) => current.has(key))) return;
+        liveKeysRef.current = next;
+        setLiveKeys(next);
+      });
+    };
+    refreshLiveRef.current();
+  }, [layout.frames, liveKey]);
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(liveFrameRequest.current);
+      liveFrameRequest.current = 0;
+    },
+    [],
+  );
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   // Until the user pans or zooms, the view follows the panel's size: it opens
   // with an animation, so the first measurement is rarely the final one.
@@ -466,6 +501,7 @@ function DesignBoard(
       }
       setZoomPercent(Math.round(view.zoom * 100));
       setTiny(view.zoom < LABEL_MIN_ZOOM);
+      refreshLiveRef.current();
       savedViews.set(viewKey, { page: pageIndex, view });
     },
     [pageIndex, viewKey],
@@ -706,6 +742,7 @@ function DesignBoard(
                 draft={props.draft}
                 designRevision={props.designRevision}
                 live={frame.key === liveKey}
+                mounted={liveKeys.has(frame.key)}
                 selected={frame.key === selectedKey}
                 onOpenFile={props.onOpenFile}
                 onZoomTo={zoomToFrame}
@@ -806,6 +843,8 @@ const DesignFrameView = memo(function DesignFrameView(props: {
   readonly draft: boolean;
   readonly designRevision: string | null;
   readonly live: boolean;
+  /** Runs as a live page; otherwise a light placeholder stands in. */
+  readonly mounted: boolean;
   readonly selected: boolean;
   readonly onOpenFile: (relativePath: string) => void;
   readonly onZoomTo: (frame: PlacedFrame) => void;
@@ -897,7 +936,15 @@ const DesignFrameView = memo(function DesignFrameView(props: {
           accent && "outline-2 outline-primary",
         )}
       >
-        {src ? (
+        {!props.mounted ? (
+          <div
+            aria-hidden
+            className="flex size-full items-center justify-center bg-muted/60 text-center leading-tight text-muted-foreground"
+            style={{ fontSize: Math.max(12, frame.width / 9), padding: frame.width / 12 }}
+          >
+            {frame.title}
+          </div>
+        ) : src ? (
           <iframe
             src={src.url}
             title={frame.title}

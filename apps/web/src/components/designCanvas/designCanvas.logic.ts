@@ -499,3 +499,54 @@ export function parseClaudeDesignCanvas(contents: string | null): DesignManifest
     },
   };
 }
+
+/** Most screens running as live pages at once; the rest show as placeholders. */
+export const MAX_LIVE_FRAMES = 40;
+/** Below this on-screen width a screen is too small to read, so it stays a placeholder. */
+export const MIN_LIVE_FRAME_WIDTH = 48;
+
+/**
+ * Which frames run as live pages for this view: those on screen (with a
+ * margin, so panning reveals loaded screens) and big enough to see, nearest
+ * the center first, up to `MAX_LIVE_FRAMES`. Frames already live stay live a
+ * little further out, so small pans do not reload them.
+ */
+export function liveFrameKeys(
+  frames: ReadonlyArray<PlacedFrame>,
+  view: CanvasView,
+  viewport: { readonly width: number; readonly height: number },
+  previous: ReadonlySet<string>,
+  pinned: string | null,
+): ReadonlySet<string> {
+  if (view.zoom <= 0) return new Set(pinned ? [pinned] : []);
+  const left = -view.x / view.zoom;
+  const top = -view.y / view.zoom;
+  const width = viewport.width / view.zoom;
+  const height = viewport.height / view.zoom;
+  const centerX = left + width / 2;
+  const centerY = top + height / 2;
+  const within = (frame: PlacedFrame, margin: number) =>
+    frame.x + frame.width >= left - width * margin &&
+    frame.x <= left + width * (1 + margin) &&
+    frame.y + frame.height >= top - height * margin &&
+    frame.y <= top + height * (1 + margin);
+  const candidates = frames
+    .filter(
+      (frame) =>
+        frame.width * view.zoom >= MIN_LIVE_FRAME_WIDTH &&
+        within(frame, previous.has(frame.key) ? 1 : 0.5),
+    )
+    .map((frame) => ({
+      key: frame.key,
+      distance: Math.hypot(
+        frame.x + frame.width / 2 - centerX,
+        frame.y + frame.height / 2 - centerY,
+      ),
+    }))
+    .toSorted((a, b) => a.distance - b.distance)
+    .slice(0, MAX_LIVE_FRAMES)
+    .map((entry) => entry.key);
+  const live = new Set(candidates);
+  if (pinned) live.add(pinned);
+  return live;
+}

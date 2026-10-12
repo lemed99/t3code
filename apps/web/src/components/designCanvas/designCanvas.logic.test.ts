@@ -12,6 +12,8 @@ import {
   findClaudeDesignCanvases,
   fitViewToRect,
   layoutDesignPage,
+  liveFrameKeys,
+  MAX_LIVE_FRAMES,
   normalizeScreenFile,
   parseClaudeDesignCanvas,
   parseDesignManifest,
@@ -324,5 +326,49 @@ describe("Claude Design canvases", () => {
 
   it("rejects files that are not Claude Design canvases", () => {
     expect(parseClaudeDesignCanvas(JSON.stringify({ pages: [] }))._tag).toBe("Invalid");
+  });
+});
+
+describe("liveFrameKeys", () => {
+  const frame = (key: string, x: number, y: number) => ({
+    key,
+    file: `${key}.html`,
+    title: key,
+    width: 400,
+    height: 800,
+    scroll: false,
+    x,
+    y,
+  });
+  const frames = [frame("a", 0, 0), frame("b", 500, 0), frame("far", 20_000, 0)];
+
+  it("runs only on-screen frames that are big enough to see", () => {
+    const view = { x: 0, y: 0, zoom: 1 };
+    expect(
+      [...liveFrameKeys(frames, view, { width: 1000, height: 900 }, new Set(), null)].toSorted(),
+    ).toEqual(["a", "b"]);
+    // At 5% a 400px screen is 20px wide: placeholders, except the one in use.
+    expect([
+      ...liveFrameKeys(
+        frames,
+        { x: 0, y: 0, zoom: 0.05 },
+        { width: 1000, height: 900 },
+        new Set(),
+        "a",
+      ),
+    ]).toEqual(["a"]);
+  });
+
+  it("caps live frames, nearest the center first", () => {
+    const many = Array.from({ length: 60 }, (_, index) => frame(`f${index}`, index * 420, 0));
+    const live = liveFrameKeys(
+      many,
+      { x: 0, y: 0, zoom: 0.2 },
+      { width: 5000, height: 900 },
+      new Set(),
+      null,
+    );
+    expect(live.size).toBe(MAX_LIVE_FRAMES);
+    expect(live.has("f0")).toBe(false);
   });
 });
