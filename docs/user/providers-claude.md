@@ -62,7 +62,10 @@ With more than one Claude account configured, enable **Switch accounts on usage
 limit** in **Settings → General** on web and desktop, or **Settings → Thread
 behavior** on mobile. A thread that hits a limit then stops and continues on
 another Claude account that still has usage left, preferring one that shares its
-conversation history. When every account is limited, the thread waits as usual.
+conversation history. On web and desktop, the setting lists your accounts once it
+is on: move them up or down to choose the order, and a limited thread goes to the
+first account in the list that still has usage left. When every account is
+limited, the thread waits as usual.
 
 ## Skills
 

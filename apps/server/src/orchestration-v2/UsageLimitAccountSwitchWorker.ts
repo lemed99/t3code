@@ -63,15 +63,24 @@ export function selectAccountSwitchTarget<Provider extends SwitchCandidateProvid
   readonly fromInstanceId: ProviderInstanceId;
   readonly nowMs: number;
   readonly limitedUntil: ReadonlyMap<ProviderInstanceId, number>;
+  /** The user's switch order; the first listed account with usage left wins. */
+  readonly order?: ReadonlyArray<string>;
 }): Provider | null {
   const from = input.providers.find((provider) => provider.instanceId === input.fromInstanceId);
   if (!from) return null;
   const sharesSession = (provider: Provider) =>
     provider.continuation?.groupKey === from.continuation?.groupKey;
+  const order = input.order ?? [];
+  const rank = (provider: Provider) => {
+    const index = order.indexOf(provider.instanceId);
+    return index === -1 ? Number.POSITIVE_INFINITY : index;
+  };
   const better = (candidate: Provider, current: Provider) =>
-    sharesSession(candidate) !== sharesSession(current)
-      ? sharesSession(candidate)
-      : peakUsedPercent(candidate) < peakUsedPercent(current);
+    rank(candidate) !== rank(current)
+      ? rank(candidate) < rank(current)
+      : sharesSession(candidate) !== sharesSession(current)
+        ? sharesSession(candidate)
+        : peakUsedPercent(candidate) < peakUsedPercent(current);
   let best: Provider | null = null;
   for (const candidate of input.providers) {
     if (candidate.instanceId === from.instanceId || candidate.driver !== from.driver) continue;
@@ -192,14 +201,17 @@ export const makeSweep = Effect.gen(function* () {
     providers: ReadonlyArray<ServerProvider>,
     from: ProviderInstanceId,
     nowMs: number,
-  ) => selectAccountSwitchTarget({ providers, fromInstanceId: from, nowMs, limitedUntil });
+    order: ReadonlyArray<string>,
+  ) => selectAccountSwitchTarget({ providers, fromInstanceId: from, nowMs, limitedUntil, order });
 
   const markLimited = (instanceId: ProviderInstanceId, until: number) => {
     if ((limitedUntil.get(instanceId) ?? 0) < until) limitedUntil.set(instanceId, until);
   };
 
   return Effect.fn("UsageLimitAccountSwitchWorker.sweep")(function* () {
-    if (!(yield* settings.getSettings).autoSwitchAccountOnUsageLimit) return;
+    const current = yield* settings.getSettings;
+    if (!current.autoSwitchAccountOnUsageLimit) return;
+    const order = current.accountSwitchOrder;
     const nowMs = DateTime.toEpochMillis(yield* DateTime.now);
     for (const [instanceId, until] of limitedUntil) {
       if (until <= nowMs) limitedUntil.delete(instanceId);
@@ -246,7 +258,7 @@ export const makeSweep = Effect.gen(function* () {
       const limitedFor = limitedThroughMs(thread, nowMs);
       if (limitedFor === null) continue;
       markLimited(thread.runProviderInstanceId, limitedFor);
-      const target = pickTarget(providers, thread.runProviderInstanceId, nowMs);
+      const target = pickTarget(providers, thread.runProviderInstanceId, nowMs, order);
       if (target === null) continue;
       attemptedRuns.add(attempt);
       const switched = yield* dispatchAll(
@@ -282,7 +294,7 @@ export const makeSweep = Effect.gen(function* () {
         run.runProviderInstanceId,
         spent !== null && Number.isFinite(spent) ? spent : nowMs + UNKNOWN_RESET_BACKOFF_MS,
       );
-      const target = pickTarget(providers, run.runProviderInstanceId, nowMs);
+      const target = pickTarget(providers, run.runProviderInstanceId, nowMs, order);
       if (target === null) continue;
       attemptedRuns.add(attempt);
       const stopped = yield* dispatchAll(

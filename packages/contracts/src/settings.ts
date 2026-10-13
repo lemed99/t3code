@@ -1127,6 +1127,14 @@ export const ServerSettings = Schema.Struct({
   autoSwitchAccountOnUsageLimit: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(false)),
   ),
+  /**
+   * Accounts (provider instance ids) in the order a usage-limit switch tries
+   * them: the first listed one with usage left wins. Unlisted accounts come
+   * after, best match first.
+   */
+  accountSwitchOrder: Schema.Array(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   sidebarAutoSettleOnMerge: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   backgroundActivity: BackgroundActivitySettings,
 
@@ -1431,6 +1439,7 @@ export const ServerSettingsPatch = Schema.Struct({
   sidebarAutoSettleOnMerge: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   autoSwitchAccountOnUsageLimit: Schema.optionalKey(Schema.Boolean),
+  accountSwitchOrder: Schema.optionalKey(Schema.Array(Schema.String)),
   snoozeLimitedThreads: Schema.optionalKey(Schema.Boolean),
   backgroundActivity: Schema.optionalKey(
     Schema.Struct({

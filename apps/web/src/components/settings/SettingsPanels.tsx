@@ -158,6 +158,7 @@ import {
   rememberEnabledProjectGroupingMode,
   resolveBackgroundActivityProfileOption,
 } from "./SettingsPanels.logic";
+import { AccountSwitchOrderList } from "./AccountSwitchOrderList";
 import {
   PolicyTooltip,
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
@@ -586,6 +587,7 @@ export function useSettingsRestore(onRestored?: () => void) {
     DEFAULT_UNIFIED_SETTINGS.autoSwitchAccountOnUsageLimit
       ? ["Switch accounts on usage limit"]
       : []),
+    ...(settings.accountSwitchOrder.length > 0 ? ["Account switch order"] : []),
     ...(settings.snoozeLimitedThreads !== DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads
       ? ["Snooze limited threads"]
       : []),
@@ -746,6 +748,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       sidebarAutoSettleOnMerge: DEFAULT_UNIFIED_SETTINGS.sidebarAutoSettleOnMerge,
       autoResumeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.autoResumeLimitedThreads,
       autoSwitchAccountOnUsageLimit: DEFAULT_UNIFIED_SETTINGS.autoSwitchAccountOnUsageLimit,
+      accountSwitchOrder: DEFAULT_UNIFIED_SETTINGS.accountSwitchOrder,
       snoozeLimitedThreads: DEFAULT_UNIFIED_SETTINGS.snoozeLimitedThreads,
       responseStreamingMode: DEFAULT_UNIFIED_SETTINGS.responseStreamingMode,
       enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
@@ -2231,7 +2234,7 @@ export function GeneralSettingsPanel() {
           serverScoped
           {...searchableSetting("auto-switch-account-on-usage-limit")}
           description="When a thread stops on a usage limit, continue it on another account of the same provider that still has usage left."
-          settingKeys={["autoSwitchAccountOnUsageLimit"]}
+          settingKeys={["autoSwitchAccountOnUsageLimit", "accountSwitchOrder"]}
           control={
             <ScopedSwitch
               settingKeys={["autoSwitchAccountOnUsageLimit"]}
@@ -2242,7 +2245,16 @@ export function GeneralSettingsPanel() {
               aria-label="Switch accounts on usage limit"
             />
           }
-        />
+        >
+          {settings.autoSwitchAccountOnUsageLimit && isEnvironmentScope ? (
+            <AccountSwitchOrderList
+              providers={serverProviders}
+              order={settings.accountSwitchOrder}
+              disabled={!hasServerTargets}
+              onChange={(order) => updateSettings({ accountSwitchOrder: [...order] })}
+            />
+          ) : null}
+        </SettingsRow>
         <SettingsRow
           serverScoped
           {...searchableSetting("snooze-limited-threads")}

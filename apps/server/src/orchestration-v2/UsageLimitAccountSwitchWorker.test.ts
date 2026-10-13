@@ -69,12 +69,14 @@ function usage(usedPercent: number, resetsAt = "2026-10-09T15:00:00.000Z") {
 const select = (
   providers: ReadonlyArray<ReturnType<typeof account>>,
   limitedUntil = new Map<ProviderInstanceId, number>(),
+  order: ReadonlyArray<string> = [],
 ) =>
   selectAccountSwitchTarget({
     providers,
     fromInstanceId: ProviderInstanceId.make("max"),
     nowMs: NOW,
     limitedUntil,
+    order,
   })?.instanceId ?? null;
 
 describe("selectAccountSwitchTarget", () => {
@@ -102,6 +104,21 @@ describe("selectAccountSwitchTarget", () => {
         account("team3", { ...shared, ...usage(40) }),
       ]),
     ).toBe("team3");
+  });
+
+  it("follows the user's order first, skipping accounts with no usage left", () => {
+    const providers = [
+      account("max"),
+      account("team1", usage(10)),
+      account("team2", usage(100)),
+      account("team3", usage(70)),
+    ];
+    expect(select(providers, new Map(), ["team2", "team3", "team1"])).toBe("team3");
+    // Unlisted accounts come after the listed ones.
+    expect(select(providers, new Map(), ["team3"])).toBe("team3");
+    expect(select([account("max"), account("team1"), account("team4")], new Map(), ["team4"])).toBe(
+      "team4",
+    );
   });
 
   it("treats a spent window whose reset has passed as open again", () => {
