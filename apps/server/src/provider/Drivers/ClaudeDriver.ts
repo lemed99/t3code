@@ -361,7 +361,8 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv, Path.
           Effect.provideService(Path.Path, path),
         ),
         configDir,
-        cwd,
+        // Like the instance probes, sign-in runs in the state dir, not $HOME.
+        cwd: stateDir,
         logout: runClaudeCommand(effectiveConfig, ["auth", "logout"], processEnv).pipe(
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.provideService(Path.Path, path),
