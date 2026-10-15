@@ -244,6 +244,50 @@ describe("readChromiumCookieDatabase", () => {
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
+  it.effect("reads values Chromium's schema 24 migration stored as text", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3code-chromium-cookies-",
+      });
+      const filename = `${directory}/Cookies`;
+      const key = Buffer.from("0123456789abcdef");
+      const bound = Buffer.concat([
+        NodeCrypto.createHash("sha256").update("migrated.example").digest(),
+        Buffer.from("kept"),
+      ]);
+
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`create table meta (key text primary key, value text not null)`;
+        yield* sql`insert into meta values ('version', 24)`;
+        yield* sql`
+          create table cookies (
+            host_key text not null, name text not null, value text not null,
+            encrypted_value blob not null, path text not null, expires_utc integer not null,
+            is_secure integer not null, is_httponly integer not null, samesite integer not null,
+            top_frame_site_key text not null default ''
+          )
+        `;
+        // The migration rewrites each value with BindString, so the ciphertext
+        // bytes land with text storage despite the column's blob type.
+        yield* sql`insert into cookies (host_key, name, value, encrypted_value, path, expires_utc, is_secure, is_httponly, samesite) values
+          ('migrated.example', 'migrated', '', cast(${encryptV10(bound, key)} as text), '/', 0, 1, 0, 0)`;
+        const [row] = yield* sql<{
+          readonly type: string;
+        }>`select typeof(encrypted_value) as type from cookies`;
+        expect(row?.type).toBe("text");
+      }).pipe(Effect.provide(NodeSqliteClient.layer({ filename })));
+
+      const result = yield* readChromiumCookieDatabase(filename, { cbcV10: key }, "darwin");
+
+      expect(result.undecryptable).toBe(0);
+      expect(result.cookies.map(({ name, value }) => ({ name, value }))).toEqual([
+        { name: "migrated", value: "kept" },
+      ]);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect("decrypts mixed v10 and v11 cookies with their respective keys", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
