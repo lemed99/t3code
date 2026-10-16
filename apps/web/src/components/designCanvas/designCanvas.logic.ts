@@ -4,6 +4,8 @@
  * lay its frames out in canvas pixels.
  */
 
+import { SCREEN_PREVIEW_TILE_HEIGHT, screenPreviewOverviewScale } from "@t3tools/shared/htmlRender";
+
 export const DESIGN_DIRECTORY = "design";
 export const DESIGN_MANIFEST_PATH = `${DESIGN_DIRECTORY}/canvas.json`;
 export const DESIGN_SCREENS_DIRECTORY = `${DESIGN_DIRECTORY}/screens`;
@@ -536,23 +538,58 @@ export function stepLiveFrames(
   return { next, done: true };
 }
 
-/** Screens given a sharp preview image at once, nearest the center first. */
-export const MAX_DETAIL_FRAMES = 24;
-/** Pixels per CSS pixel of a screen's overview image. */
-export const OVERVIEW_IMAGE_SCALE = 0.5;
+/** Sharp preview tiles asked for at once, nearest the center first. */
+export const MAX_DETAIL_TILES = 32;
 
 /**
- * Frames on screen shown with more device pixels than their overview image
- * holds, so they need the sharp one.
+ * Which sharp tiles each screen needs: those of screens shown with more device
+ * pixels than their overview image holds, within (or half a panel beyond) the
+ * view, nearest the center first.
  */
-export function detailFrameKeys(
+export function detailTiles(
   frames: ReadonlyArray<PlacedFrame>,
   view: CanvasView,
   viewport: { readonly width: number; readonly height: number },
   devicePixelRatio: number,
-): ReadonlySet<string> {
-  if (view.zoom * devicePixelRatio <= OVERVIEW_IMAGE_SCALE) return new Set();
-  return liveFrameKeys(frames, view, viewport, new Set(), null, () => 0, MAX_DETAIL_FRAMES);
+): ReadonlyMap<string, ReadonlyArray<number>> {
+  const tiles = new Map<string, Array<number>>();
+  if (view.zoom <= 0) return tiles;
+  const left = -view.x / view.zoom;
+  const top = -view.y / view.zoom;
+  const width = viewport.width / view.zoom;
+  const height = viewport.height / view.zoom;
+  const margin = 0.5;
+  const candidates: Array<{ key: string; index: number; distance: number }> = [];
+  for (const frame of frames) {
+    if (view.zoom * devicePixelRatio <= screenPreviewOverviewScale(frame.width, frame.height)) {
+      continue;
+    }
+    if (frame.x + frame.width < left - width * margin || frame.x > left + width * (1 + margin)) {
+      continue;
+    }
+    for (let index = 0; index * SCREEN_PREVIEW_TILE_HEIGHT < frame.height; index++) {
+      const tileTop = frame.y + index * SCREEN_PREVIEW_TILE_HEIGHT;
+      const tileBottom = Math.min(frame.y + frame.height, tileTop + SCREEN_PREVIEW_TILE_HEIGHT);
+      if (tileBottom < top - height * margin || tileTop > top + height * (1 + margin)) continue;
+      candidates.push({
+        key: frame.key,
+        index,
+        distance: Math.hypot(
+          frame.x + frame.width / 2 - (left + width / 2),
+          (tileTop + tileBottom) / 2 - (top + height / 2),
+        ),
+      });
+    }
+  }
+  for (const { key, index } of candidates
+    .toSorted((a, b) => a.distance - b.distance)
+    .slice(0, MAX_DETAIL_TILES)) {
+    const list = tiles.get(key) ?? [];
+    list.push(index);
+    tiles.set(key, list);
+  }
+  for (const list of tiles.values()) list.sort((a, b) => a - b);
+  return tiles;
 }
 
 /**
@@ -569,11 +606,12 @@ export function gridTransform(view: CanvasView, tile = 24): string {
   return `translate(${offset(view.x)}px, ${offset(view.y)}px) scale(${spacing / tile})`;
 }
 
-/** The image URL for a screen, from the asset URL of the screen itself. */
+/** The image URL for a screen, or one sharp tile of it, from the screen's asset URL. */
 export function screenThumbnailSrc(
   assetUrl: string,
   frame: { readonly file: string; readonly width: number; readonly height: number },
   workspaceMutationId: string | null,
+  tile: number | null = null,
 ): string {
   const hashAt = frame.file.indexOf("#");
   const params = new URLSearchParams({
@@ -581,6 +619,7 @@ export function screenThumbnailSrc(
     w: String(Math.round(frame.width)),
     h: String(Math.round(frame.height)),
   });
+  if (tile !== null) params.set("tile", String(tile));
   if (hashAt !== -1) params.set("fragment", frame.file.slice(hashAt + 1));
   if (workspaceMutationId !== null) params.set("workspace-revision", workspaceMutationId);
   return `${assetUrl}${assetUrl.includes("?") ? "&" : "?"}${params.toString()}`;

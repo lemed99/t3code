@@ -48,10 +48,13 @@ const webpSize = (bytes: Uint8Array) => {
 };
 
 describe("ScreenThumbnails", () => {
-  it("keeps small screens sharp and wide ones at their own size", () => {
+  it("keeps tiles at two pixels per CSS pixel and overviews within image limits", () => {
     expect(ScreenThumbnails.detailScale(390)).toBe(2);
-    expect(ScreenThumbnails.detailScale(800)).toBe(1.5);
-    expect(ScreenThumbnails.detailScale(1440)).toBe(1);
+    expect(ScreenThumbnails.detailScale(1440)).toBe(2);
+    expect(ScreenThumbnails.detailScale(1920)).toBe(1.5);
+    expect(ScreenThumbnails.overviewScale(1440, 7547)).toBe(0.5);
+    expect(ScreenThumbnails.overviewScale(390, 32_768)).toBe(0.25);
+    expect(ScreenThumbnails.tileCount(7547)).toBe(8);
   });
 
   it.effect("starts installing the browser and reports no image until it is there", () => {
@@ -63,7 +66,7 @@ describe("ScreenThumbnails", () => {
         pagePath: "home.html",
         width: 390,
         height: 844,
-        detail: "overview",
+        image: { _tag: "Overview" },
         resolveFile: () => Effect.succeed(null),
       });
       expect(result._tag).toBe("Unavailable");
@@ -94,7 +97,7 @@ describe("ScreenThumbnails", () => {
           yield* fileSystem.makeDirectory(path.dirname(screen), { recursive: true });
           yield* fileSystem.writeFileString(
             screen,
-            '<!doctype html><link rel="stylesheet" href="./styles.css"><h1>Home</h1>',
+            '<!doctype html><link rel="stylesheet" href="./styles.css"><h1>Home</h1><p style="margin-top:2300px">End</p>',
           );
           yield* fileSystem.writeFileString(styles, "body { background: rgb(200, 30, 40); }");
 
@@ -103,8 +106,8 @@ describe("ScreenThumbnails", () => {
             filePath: screen,
             pagePath: "screens/home.html",
             width: 300,
-            height: 500,
-            detail: "detail" as const,
+            height: 2500,
+            image: { _tag: "Tile", index: 0 } as ScreenThumbnails.ScreenThumbnailImage,
             resolveFile: (relativePath: string) =>
               Effect.sync(() => {
                 requested.push(relativePath);
@@ -116,7 +119,8 @@ describe("ScreenThumbnails", () => {
 
           const first = yield* thumbnails.thumbnail(request);
           if (first._tag !== "Image") return expect.fail("the screen was not rendered");
-          expect(webpSize(first.bytes)).toEqual([600, 1000]);
+          // Tiles are 1024 CSS pixels tall at two image pixels each.
+          expect(webpSize(first.bytes)).toEqual([600, 2048]);
           expect(requested).toEqual(
             expect.arrayContaining(["screens/home.html", "screens/styles.css"]),
           );
@@ -124,10 +128,16 @@ describe("ScreenThumbnails", () => {
           requested.length = 0;
           const again = yield* thumbnails.thumbnail(request);
           expect(again).toEqual(first);
-          // The same load also made the half-scale overview.
-          const overview = yield* thumbnails.thumbnail({ ...request, detail: "overview" });
+          // The same load made the last, shorter tile and the full-height overview.
+          const last = yield* thumbnails.thumbnail({
+            ...request,
+            image: { _tag: "Tile", index: 2 },
+          });
+          if (last._tag !== "Image") return expect.fail("the last tile was not cached");
+          expect(webpSize(last.bytes)).toEqual([600, 904]);
+          const overview = yield* thumbnails.thumbnail({ ...request, image: { _tag: "Overview" } });
           if (overview._tag !== "Image") return expect.fail("the overview was not cached");
-          expect(webpSize(overview.bytes)).toEqual([150, 250]);
+          expect(webpSize(overview.bytes)).toEqual([150, 1250]);
           expect(requested).toEqual([]);
 
           // A changed stylesheet changes the screen, though the screen's own file did not.

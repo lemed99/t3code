@@ -1,5 +1,6 @@
 import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
+import { SCREEN_PREVIEW_TILE_HEIGHT } from "@t3tools/shared/htmlRender";
 import {
   FileCode2,
   FileText,
@@ -32,7 +33,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "~/components/ui/select";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useWorkspaceMutationRefresh } from "~/hooks/useWorkspaceMutationRefresh";
 import { observeResize } from "~/lib/observeResize";
 import { cn } from "~/lib/utils";
@@ -50,7 +50,7 @@ import {
   type PlacedFrame,
   fitViewToRect,
   layoutDesignPage,
-  detailFrameKeys,
+  detailTiles,
   gridTransform,
   liveFrameKeys,
   liveFrameMinWidth,
@@ -71,6 +71,7 @@ import {
   parseArtifactIndex,
 } from "./artifacts.logic";
 import { ArtifactPageView } from "./ArtifactPageView";
+import { PREVIEW_PRIORITY, PreviewLoader, usePreviewImage } from "./previewLoader";
 import { DesignSystemView } from "./DesignSystemView";
 import {
   ArtifactHeader,
@@ -88,6 +89,10 @@ const LABEL_MIN_ZOOM = 0.12;
 /** A screen's preview is retried this often before it is given up on. */
 const PREVIEW_RETRIES = 3;
 const PREVIEW_RETRY_MS = 15_000;
+// Leaves the browser's other connections to this server free for the app.
+const PREVIEW_DOWNLOADS = 4;
+/** Sharp tiles a screen keeps once asked for, the most recent first. */
+const MAX_TILES_PER_SCREEN = 12;
 /** Spacing of the dot grid at its densest; it doubles as the zoom halves. */
 const GRID_TILE = 24;
 /** Between steps that start more live pages. */
@@ -159,6 +164,12 @@ export default function ArtifactsPanel(props: DesignCanvasPanelProps) {
     refreshList();
     setManualReloads((count) => count + 1);
   }, [refreshList]);
+  // Other artifacts' previews are prepared once the open one has had a head start.
+  const [prewarming, setPrewarming] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setPrewarming(true), PREWARM_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, []);
 
   if (!selected) {
     if (projectEntries.isPending) return <PanelSpinner />;
@@ -171,6 +182,28 @@ export default function ArtifactsPanel(props: DesignCanvasPanelProps) {
   }
   const picker = <ArtifactPicker artifacts={artifacts} selected={selected} onSelect={choose} />;
   const view = { ...props, designRevision: revision, onReload: reload, picker };
+  return (
+    <>
+      <ArtifactView selected={selected} view={view} />
+      {prewarming
+        ? artifacts.map((artifact) => (
+            <PreviewPrewarm
+              key={artifact.id}
+              {...props}
+              designRevision={revision}
+              artifact={artifact}
+            />
+          ))
+        : null}
+    </>
+  );
+}
+
+function ArtifactView(props: {
+  readonly selected: ProjectArtifact;
+  readonly view: ArtifactViewProps;
+}) {
+  const { selected, view } = props;
   switch (selected.content._tag) {
     case "ProjectCanvas":
       return <ProjectCanvasView key={selected.id} {...view} root={selected.content.root} />;
@@ -267,8 +300,139 @@ function screensCanvas(title: string, files: ReadonlyArray<string>): DesignCanva
   };
 }
 
+type CanvasSourceProps = Pick<
+  DesignCanvasPanelProps,
+  "environmentId" | "cwd" | "designRevision" | "threadRef" | "draft"
+> & { readonly root: string };
+
+/**
+ * Asks the server for the previews of every design artifact, every page, in
+ * the background, so an artifact opened next finds them made. Screens whose
+ * files have not changed come back from the server's cache at once.
+ */
+function PreviewPrewarm(props: DesignCanvasPanelProps & { readonly artifact: ProjectArtifact }) {
+  const content = props.artifact.content;
+  switch (content._tag) {
+    case "ProjectCanvas":
+      return <ProjectCanvasPrewarm {...props} root={content.root} />;
+    case "ClaudeCanvas":
+      return <ClaudeCanvasPrewarm {...props} root={content.root} />;
+    case "Screens":
+      return (
+        <CanvasPrewarm
+          {...props}
+          root={content.root}
+          canvas={screensCanvas(props.artifact.title, content.files)}
+        />
+      );
+    default:
+      return null;
+  }
+}
+
+function ProjectCanvasPrewarm(props: CanvasSourceProps) {
+  const { canvas } = useProjectCanvas(props);
+  return <CanvasPrewarm {...props} canvas={canvas} />;
+}
+
+function ClaudeCanvasPrewarm(props: CanvasSourceProps) {
+  const { parsed } = useClaudeCanvas(props);
+  return parsed._tag === "Valid" ? <CanvasPrewarm {...props} canvas={parsed.canvas} /> : null;
+}
+
+function CanvasPrewarm(props: CanvasSourceProps & { readonly canvas: DesignCanvas }) {
+  const folders = useMemo(() => {
+    const byFolder = new Map<string, Array<PlacedFrame>>();
+    for (const page of props.canvas.pages) {
+      for (const frame of layoutDesignPage(page).frames) {
+        const folder = frameDirectory(frame.file);
+        byFolder.set(folder, [...(byFolder.get(folder) ?? []), frame]);
+      }
+    }
+    return [...byFolder.values()];
+  }, [props.canvas]);
+  return folders.map((frames) => (
+    <FolderPrewarm key={frameDirectory(frames[0]!.file)} {...props} frames={frames} />
+  ));
+}
+
+function FolderPrewarm(props: CanvasSourceProps & { readonly frames: ReadonlyArray<PlacedFrame> }) {
+  const tokenPath = `${props.root}/${props.frames[0]!.file.split("#", 1)[0]}`;
+  const resource = useMemo(
+    () =>
+      workspaceAssetResource({
+        kind: "workspace-file",
+        threadRef: props.threadRef,
+        draft: props.draft,
+        workspaceRoot: props.cwd,
+        absolutePath: tokenPath,
+      }),
+    [props.threadRef, props.draft, props.cwd, tokenPath],
+  );
+  const assetUrl = useAssetUrlState(props.environmentId, resource);
+  const tokenUrl = assetUrl._tag === "Success" ? assetUrl.url : null;
+  useEffect(() => {
+    if (tokenUrl === null) return;
+    for (const frame of props.frames) {
+      queuePreviewPrewarm(
+        `${props.root}/${frame.file}:${frame.width}x${frame.height}:${props.designRevision ?? ""}`,
+        `${screenThumbnailSrc(siblingAssetUrl(tokenUrl, frame.file), frame, props.designRevision)}&background`,
+      );
+    }
+  }, [tokenUrl, props.frames, props.root, props.designRevision]);
+  return null;
+}
+
+// One queue for the whole app: a couple of requests at a time, after a pause,
+// so the screens someone is looking at are always fetched first.
+const PREWARM_CONCURRENCY = 1;
+const PREWARM_DELAY_MS = 3_000;
+const prewarmed = new Set<string>();
+const prewarmQueue: Array<string> = [];
+let prewarmRunning = 0;
+let prewarmTimer: ReturnType<typeof setTimeout> | null = null;
+let prewarmHeld = false;
+
+function queuePreviewPrewarm(key: string, url: string) {
+  if (prewarmed.has(key)) return;
+  prewarmed.add(key);
+  prewarmQueue.push(url);
+  if (!prewarmHeld) prewarmTimer ??= setTimeout(drainPrewarmQueue, PREWARM_DELAY_MS);
+}
+
+/**
+ * Holds off new captures until the canvas has been still for a while: a
+ * capture takes a whole CPU core for a second or two, which a zoom or pan
+ * on a smaller machine feels.
+ */
+function holdPreviewPrewarm(moving: boolean) {
+  prewarmHeld = moving;
+  if (prewarmTimer !== null) clearTimeout(prewarmTimer);
+  prewarmTimer = moving ? null : setTimeout(drainPrewarmQueue, PREWARM_DELAY_MS);
+}
+
+function drainPrewarmQueue() {
+  prewarmTimer = null;
+  startPrewarms();
+}
+
+function startPrewarms() {
+  if (prewarmHeld || prewarmTimer !== null) return;
+  while (prewarmRunning < PREWARM_CONCURRENCY && prewarmQueue.length > 0) {
+    const url = prewarmQueue.shift()!;
+    prewarmRunning += 1;
+    void fetch(url, { priority: "low" })
+      .then((response) => response.arrayBuffer())
+      .catch(() => undefined)
+      .finally(() => {
+        prewarmRunning -= 1;
+        startPrewarms();
+      });
+  }
+}
+
 /** A canvas agents write in T3 Code: `canvas.json` and `screens/` in `root`. */
-function ProjectCanvasView(props: ArtifactViewProps & { readonly root: string }) {
+function useProjectCanvas(props: CanvasSourceProps) {
   const manifest = useProjectFileQuery(props.environmentId, props.cwd, `${props.root}/canvas.json`);
   const screens = useProjectEntriesQuery(props.environmentId, props.cwd, `${props.root}/screens`);
   const refreshManifest = manifest.refresh;
@@ -301,8 +465,13 @@ function ProjectCanvasView(props: ArtifactViewProps & { readonly root: string })
       ),
     [parsed, screenFiles],
   );
+  return { canvas, parsed, pending: manifest.isPending || screens.isPending };
+}
+
+function ProjectCanvasView(props: ArtifactViewProps & { readonly root: string }) {
+  const { canvas, parsed, pending } = useProjectCanvas(props);
   if (!canvas.pages.some((page) => page.sections.some((section) => section.frames.length > 0))) {
-    if (manifest.isPending || screens.isPending) return <PanelSpinner />;
+    if (pending) return <PanelSpinner />;
     return parsed._tag === "Invalid" ? (
       <PanelEmpty
         title="The canvas can't be read"
@@ -325,7 +494,7 @@ function ProjectCanvasView(props: ArtifactViewProps & { readonly root: string })
 }
 
 /** A canvas copied from Claude Design: artboards keep their own positions. */
-function ClaudeCanvasView(props: ArtifactViewProps & { readonly root: string }) {
+function useClaudeCanvas(props: CanvasSourceProps) {
   const manifest = useProjectFileQuery(props.environmentId, props.cwd, `${props.root}/canvas.json`);
   useWorkspaceMutationRefresh({
     mutationId: props.designRevision,
@@ -336,8 +505,13 @@ function ClaudeCanvasView(props: ArtifactViewProps & { readonly root: string }) 
     () => parseClaudeDesignCanvas(manifest.data?.contents ?? null),
     [manifest.data?.contents],
   );
+  return { parsed, pending: manifest.isPending };
+}
+
+function ClaudeCanvasView(props: ArtifactViewProps & { readonly root: string }) {
+  const { parsed, pending } = useClaudeCanvas(props);
   if (parsed._tag !== "Valid" || parsed.canvas.pages.length === 0) {
-    if (manifest.isPending) return <PanelSpinner />;
+    if (pending) return <PanelSpinner />;
     return (
       <PanelEmpty
         title="The canvas can't be read"
@@ -451,6 +625,10 @@ function DesignBoard(
     return files;
   }, [layout.frames]);
 
+  // A board left behind (another artifact or page picked) stops its downloads,
+  // so the server captures what is on screen now instead.
+  const [previewLoader] = useState(() => new PreviewLoader(PREVIEW_DOWNLOADS));
+  useEffect(() => () => previewLoader.clear(), [previewLoader]);
   const viewportRef = useRef<HTMLDivElement>(null);
   // Screens show as preview images, and run as live pages only on screen and
   // near their own size (or, without a preview, once big enough to see).
@@ -465,7 +643,10 @@ function DesignBoard(
     refreshLiveRef.current();
   }, []);
   // Screens close enough to show more than their overview image holds.
-  const [detailKeys, setDetailKeys] = useState<ReadonlySet<string>>(() => new Set());
+  // The sharp tiles each screen in view needs, as a comma list per frame key.
+  const [tilesByKey, setTilesByKey] = useState<ReadonlyMap<string, string>>(() => new Map());
+  // Screens in or near the view, whose previews are fetched first.
+  const [nearKeys, setNearKeys] = useState<ReadonlySet<string>>(() => new Set());
   const worldRef = useRef<HTMLDivElement>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const labelsRef = useRef<HTMLDivElement>(null);
@@ -507,11 +688,30 @@ function DesignBoard(
           liveKeysRef.current = next;
           setLiveKeys(next);
         }
-        const detail = detailFrameKeys(layout.frames, view, viewport, window.devicePixelRatio);
-        setDetailKeys((previous) =>
-          previous.size === detail.size && [...detail].every((key) => previous.has(key))
+        const tiles = new Map(
+          [...detailTiles(layout.frames, view, viewport, window.devicePixelRatio)].map(
+            ([key, indices]) => [key, indices.join(",")] as const,
+          ),
+        );
+        const near = liveFrameKeys(
+          layout.frames,
+          view,
+          viewport,
+          new Set(),
+          null,
+          () => 0,
+          Infinity,
+        );
+        setNearKeys((previous) =>
+          previous.size === near.size && [...near].every((key) => previous.has(key))
             ? previous
-            : detail,
+            : near,
+        );
+        setTilesByKey((previous) =>
+          previous.size === tiles.size &&
+          [...tiles].every(([key, list]) => previous.get(key) === list)
+            ? previous
+            : tiles,
         );
       });
     };
@@ -535,6 +735,16 @@ function DesignBoard(
   // run live, and which get sharper images, is decided once the gesture pauses.
   const paintRequest = useRef(0);
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // A live page runs in a process of its own, which redraws it from scratch at
+  // every new scale; through a pinch that is most of the work on the machine.
+  // Live pages step aside for their previews while a gesture runs, staying
+  // loaded, and return when it settles.
+  const setLivePagesPaused = useCallback((paused: boolean) => {
+    for (const frame of worldRef.current?.querySelectorAll("iframe") ?? []) {
+      frame.style.visibility = paused ? "hidden" : "";
+    }
+  }, []);
+
   const settleView = useCallback(() => {
     if (settleTimer.current !== null) clearTimeout(settleTimer.current);
     settleTimer.current = null;
@@ -543,10 +753,17 @@ function DesignBoard(
     // A promoted layer keeps the resolution it was drawn at, so a zoom leaves
     // it blurry; dropping the hint redraws it sharp at the new scale.
     if (worldRef.current) worldRef.current.style.willChange = "auto";
+    setLivePagesPaused(false);
+    holdPreviewPrewarm(false);
     setLabelZoom(view.zoom);
+    // Widths change only here, so a gesture never lays the labels out.
+    for (const frame of layoutFramesRef.current) {
+      const label = labelElementsRef.current.get(frame.key);
+      if (label) label.style.width = `${frame.width * view.zoom}px`;
+    }
     refreshLiveRef.current();
     savedViews.set(viewKey, { page: pageIndex, view });
-  }, [pageIndex, viewKey]);
+  }, [pageIndex, viewKey, setLivePagesPaused]);
 
   const paintView = useCallback(() => {
     paintRequest.current = 0;
@@ -605,18 +822,25 @@ function DesignBoard(
       }
       // Moving as one GPU layer for the length of the gesture.
       const world = worldRef.current;
-      if (world && world.style.willChange !== "transform") world.style.willChange = "transform";
+      if (world && world.style.willChange !== "transform") {
+        world.style.willChange = "transform";
+        setLivePagesPaused(true);
+        holdPreviewPrewarm(true);
+      }
       // Trackpads send several events per frame; draw once per frame.
       if (!paintRequest.current) paintRequest.current = requestAnimationFrame(paintView);
       if (settleTimer.current !== null) clearTimeout(settleTimer.current);
       settleTimer.current = setTimeout(settleView, GESTURE_SETTLE_MS);
     },
-    [paintView, settleView],
+    [paintView, settleView, setLivePagesPaused],
   );
   useEffect(
     () => () => {
       cancelAnimationFrame(paintRequest.current);
-      if (settleTimer.current !== null) clearTimeout(settleTimer.current);
+      if (settleTimer.current !== null) {
+        clearTimeout(settleTimer.current);
+        holdPreviewPrewarm(false);
+      }
     },
     [],
   );
@@ -896,9 +1120,11 @@ function DesignBoard(
                 designRevision={props.designRevision}
                 live={frame.key === liveKey}
                 mounted={liveKeys.has(frame.key)}
-                detail={detailKeys.has(frame.key)}
+                tiles={tilesByKey.get(frame.key) ?? ""}
+                near={nearKeys.has(frame.key)}
                 selected={frame.key === selectedKey}
                 onPreviewFailed={markPreviewFailed}
+                loader={previewLoader}
               />
             ))}
           </div>
@@ -910,7 +1136,7 @@ function DesignBoard(
                   frame={frame}
                   relativePath={`${props.root}/${frame.file.split("#", 1)[0]}`}
                   accent={frame.key === liveKey || frame.key === selectedKey}
-                  width={Math.round(frame.width * labelZoom)}
+                  fit={labelFit(frame.width * labelZoom)}
                   onOpenFile={props.onOpenFile}
                   onZoomTo={zoomToFrame}
                 />
@@ -1006,12 +1232,15 @@ function siblingAssetUrl(url: string, file: string): string {
  * places labels in screen space; their width, and what fits in it, follows
  * the settled zoom, so a gesture neither lays them out nor re-renders them.
  */
+type LabelFit = 0 | 1 | 2;
+const labelFit = (width: number): LabelFit => (width > 240 ? 2 : width > 110 ? 1 : 0);
+
 const FrameLabel = memo(function FrameLabel(props: {
   readonly frame: PlacedFrame;
   readonly relativePath: string;
   readonly accent: boolean;
-  /** On-screen width at the settled zoom. */
-  readonly width: number;
+  /** What fits beside the name at the settled zoom: 0 nothing, 1 the button, 2 also the size. */
+  readonly fit: LabelFit;
   readonly onOpenFile: (relativePath: string) => void;
   readonly onZoomTo: (frame: PlacedFrame) => void;
 }) {
@@ -1023,35 +1252,30 @@ const FrameLabel = memo(function FrameLabel(props: {
         "pointer-events-auto absolute top-0 left-0 flex h-[26px] items-center gap-1 text-xs whitespace-nowrap text-muted-foreground",
         props.accent && "text-primary",
       )}
-      // Placed (and hidden off screen) by the board's paintView, outside React.
-      style={{ width: props.width, visibility: "hidden" }}
+      // Placed, sized and hidden off screen by the board, outside React.
+      style={{ visibility: "hidden" }}
       onDoubleClick={(event) => {
         event.stopPropagation();
         props.onZoomTo(frame);
       }}
     >
       <span className="min-w-0 flex-1 truncate">{frame.title}</span>
-      {props.width > 240 ? (
+      {props.fit === 2 ? (
         <span className="tabular-nums opacity-70">
           {frame.width} × {frame.height}
         </span>
       ) : null}
-      {props.width > 110 ? (
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="icon-xs"
-                variant="ghost-muted"
-                aria-label={`Open ${relativePath}`}
-                onClick={() => props.onOpenFile(relativePath)}
-              />
-            }
-          >
-            <FileCode2 />
-          </TooltipTrigger>
-          <TooltipPopup>Open the screen's file</TooltipPopup>
-        </Tooltip>
+      {props.fit >= 1 ? (
+        // A native tooltip: a component one per label would cost every re-render.
+        <Button
+          size="icon-xs"
+          variant="ghost-muted"
+          aria-label={`Open ${relativePath}`}
+          title="Open the screen's file"
+          onClick={() => props.onOpenFile(relativePath)}
+        >
+          <FileCode2 />
+        </Button>
       ) : null}
     </div>
   );
@@ -1070,10 +1294,13 @@ const DesignFrameView = memo(function DesignFrameView(props: {
   readonly live: boolean;
   /** Runs as a live page over its preview image. */
   readonly mounted: boolean;
-  /** Shown large enough to need the sharp preview image. */
-  readonly detail: boolean;
+  /** Sharp preview tiles in view, as a comma list of tile indices. */
+  readonly tiles: string;
+  /** In or near the view, so its preview is fetched ahead of the others. */
+  readonly near: boolean;
   readonly selected: boolean;
   readonly onPreviewFailed: (key: string) => void;
+  readonly loader: PreviewLoader;
 }) {
   const { frame } = props;
   const relativePath = `${props.root}/${frame.file.split("#", 1)[0]}`;
@@ -1117,7 +1344,6 @@ const DesignFrameView = memo(function DesignFrameView(props: {
 
   // The server answers 503 while its browser installs; a few retries cover that.
   const [previewAttempt, setPreviewAttempt] = useState(0);
-  const [previewFailed, setPreviewFailed] = useState(false);
   const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
@@ -1125,10 +1351,19 @@ const DesignFrameView = memo(function DesignFrameView(props: {
     },
     [],
   );
+  const previewUrl =
+    src === null
+      ? null
+      : `${src.preview}${previewAttempt === 0 ? "" : `&attempt=${previewAttempt}`}`;
+  const overview = usePreviewImage(
+    props.loader,
+    previewUrl,
+    props.near ? PREVIEW_PRIORITY.near : PREVIEW_PRIORITY.far,
+  );
   const { onPreviewFailed } = props;
-  const onPreviewError = useCallback(() => {
+  useEffect(() => {
+    if (overview !== null || previewUrl === null) return;
     if (previewAttempt >= PREVIEW_RETRIES) {
-      setPreviewFailed(true);
       onPreviewFailed(frame.key);
       return;
     }
@@ -1136,27 +1371,27 @@ const DesignFrameView = memo(function DesignFrameView(props: {
       () => setPreviewAttempt((attempt) => attempt + 1),
       PREVIEW_RETRY_MS,
     );
-  }, [previewAttempt, onPreviewFailed, frame.key]);
-  const previewUrl =
-    src === null || previewFailed
-      ? null
-      : `${src.preview}${previewAttempt === 0 ? "" : `&attempt=${previewAttempt}`}`;
-  // The sharp image stays once loaded, so zooming back out never blurs it again.
-  const [wantDetail, setWantDetail] = useState(props.detail);
-  if (props.detail && !wantDetail) setWantDetail(true);
-  const [loaded, setLoaded] = useState<{
-    overview: string | null;
-    detail: string | null;
-    page: string | null;
-  }>({
-    overview: null,
-    detail: null,
-    page: null,
-  });
-  const detailUrl = previewUrl === null ? null : `${previewUrl}&detail`;
+  }, [overview, previewUrl, previewAttempt, onPreviewFailed, frame.key]);
+  // Tiles stay once asked for (until the screen changes), so moving back over
+  // a part already seen never blurs it again.
+  const [shownTiles, setShownTiles] = useState<{
+    readonly preview: string | null;
+    readonly indices: ReadonlyArray<number>;
+  }>({ preview: null, indices: [] });
+  const wanted = props.tiles === "" ? [] : props.tiles.split(",").map(Number);
+  const tilesCurrent = shownTiles.preview === previewUrl;
+  if (!tilesCurrent || wanted.some((index) => !shownTiles.indices.includes(index))) {
+    setShownTiles({
+      preview: previewUrl,
+      indices: [...new Set([...(tilesCurrent ? shownTiles.indices : []), ...wanted])].slice(
+        -MAX_TILES_PER_SCREEN,
+      ),
+    });
+  }
+  const [loadedPage, setLoadedPage] = useState<string | null>(null);
   // A page that leaves must load again before it covers its preview next time.
-  if (!props.mounted && loaded.page !== null) setLoaded((current) => ({ ...current, page: null }));
-  const pageShown = props.mounted && src !== null && loaded.page === src.page;
+  if (!props.mounted && loadedPage !== null) setLoadedPage(null);
+  const pageShown = props.mounted && src !== null && loadedPage === src.page;
 
   const accent = props.live || props.selected;
   return (
@@ -1184,30 +1419,26 @@ const DesignFrameView = memo(function DesignFrameView(props: {
             {frame.title}
           </div>
         )}
-        {previewUrl !== null && !pageShown ? (
+        {overview ? (
           <img
-            src={previewUrl}
+            src={overview}
             alt=""
             draggable={false}
             decoding="async"
-            className={cn(
-              "absolute inset-0 size-full",
-              loaded.overview !== previewUrl && "invisible",
-            )}
-            onLoad={() => setLoaded((current) => ({ ...current, overview: previewUrl }))}
-            onError={onPreviewError}
+            className="absolute inset-0 size-full"
           />
         ) : null}
-        {detailUrl !== null && wantDetail && !pageShown ? (
-          <img
-            src={detailUrl}
-            alt=""
-            draggable={false}
-            decoding="async"
-            className={cn("absolute inset-0 size-full", loaded.detail !== detailUrl && "invisible")}
-            onLoad={() => setLoaded((current) => ({ ...current, detail: detailUrl }))}
-          />
-        ) : null}
+        {previewUrl !== null && tilesCurrent
+          ? shownTiles.indices.map((index) => (
+              <PreviewTile
+                key={index}
+                loader={props.loader}
+                url={`${previewUrl}&tile=${index}`}
+                top={index * SCREEN_PREVIEW_TILE_HEIGHT}
+                frameHeight={frame.height}
+              />
+            ))
+          : null}
         {props.mounted && src !== null ? (
           <iframe
             src={src.page}
@@ -1220,10 +1451,33 @@ const DesignFrameView = memo(function DesignFrameView(props: {
               !pageShown && "opacity-0",
               !props.live && "pointer-events-none",
             )}
-            onLoad={() => setLoaded((current) => ({ ...current, page: src.page }))}
+            onLoad={() => setLoadedPage(src.page)}
           />
         ) : null}
       </div>
     </div>
+  );
+});
+
+const PreviewTile = memo(function PreviewTile(props: {
+  readonly loader: PreviewLoader;
+  readonly url: string;
+  readonly top: number;
+  readonly frameHeight: number;
+}) {
+  const image = usePreviewImage(props.loader, props.url, PREVIEW_PRIORITY.tile);
+  if (!image) return null;
+  return (
+    <img
+      src={image}
+      alt=""
+      draggable={false}
+      decoding="async"
+      className="absolute inset-x-0 w-full"
+      style={{
+        top: props.top,
+        height: Math.min(SCREEN_PREVIEW_TILE_HEIGHT, props.frameHeight - props.top),
+      }}
+    />
   );
 });

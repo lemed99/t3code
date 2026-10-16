@@ -42,8 +42,8 @@ const MAX_CONSOLE_TEXT_CHARS = 500;
 const VIEWPORT_HEIGHT = 800;
 const MAX_CAPTURE_HEIGHT = 4_000;
 const CAPTURE_TIMEOUT = "20 seconds";
-const SCREEN_LOAD_WAIT = "6 seconds";
-const SCREEN_SETTLE_WAIT = "2 seconds";
+const SCREEN_LOAD_WAIT = "5 seconds";
+const SCREEN_SETTLE_WAIT = "1500 millis";
 // Chrome refuses local files to every web page, frame, worker, and popup, so a
 // page cannot read files the agent's provider withholds; local images reach it
 // already inlined as data URIs. `.localhost` keeps it a secure context that may
@@ -627,10 +627,11 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       ).pipe(Effect.timeoutOption(SCREEN_SETTLE_WAIT));
     });
 
-    const viewportImage = (height: number, scale = 1) =>
+    /** A band of the page, `scale` relative to the device scale factor. */
+    const regionImage = (y: number, height: number, scale = 1) =>
       send(
         "Page.captureScreenshot",
-        { format: "webp", quality: 82, clip: { x: 0, y: 0, width, height, scale } },
+        { format: "webp", quality: 85, clip: { x: 0, y, width, height, scale } },
         Schema.Struct({ data: Schema.String }),
         sessionId,
       ).pipe(Effect.map(({ data }) => Buffer.from(data, "base64")));
@@ -683,7 +684,7 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       ),
     );
 
-    return { load, loadPath, outline, screenshot, viewportImage, consoleMessages, close };
+    return { load, loadPath, outline, screenshot, regionImage, consoleMessages, close };
   });
 
   return { openPage };
@@ -704,9 +705,17 @@ export const launchScreenBrowser = Effect.fn("headlessChrome.launchScreenBrowser
   },
 );
 
+/** A band of a screen to capture, in CSS pixels, at `scale` image pixels each. */
+export interface ScreenRegion {
+  readonly y: number;
+  readonly height: number;
+  readonly scale: number;
+}
+
 /**
- * A screen as it first appears at its own size, as WebP images at each of
- * `scales` (pixels per CSS pixel), all from one load.
+ * A screen as it first appears at its own size, as one WebP image per region,
+ * all from one load. The viewport is the screen's full size, as a live frame
+ * of it is, so layout that depends on the viewport matches.
  */
 export const captureScreen = Effect.fn("headlessChrome.captureScreen")(
   function* (
@@ -715,11 +724,11 @@ export const captureScreen = Effect.fn("headlessChrome.captureScreen")(
       readonly path: string;
       readonly width: number;
       readonly height: number;
-      readonly scales: ReadonlyArray<number>;
+      readonly regions: ReadonlyArray<ScreenRegion>;
       readonly serve: (path: string) => Effect.Effect<ServedFile | null>;
     },
   ) {
-    const deviceScaleFactor = Math.max(...input.scales);
+    const deviceScaleFactor = Math.max(...input.regions.map((region) => region.scale));
     const page = yield* browser.openPage(input.width, {
       height: input.height,
       deviceScaleFactor,
@@ -729,8 +738,8 @@ export const captureScreen = Effect.fn("headlessChrome.captureScreen")(
       .loadPath(input.path)
       .pipe(
         Effect.andThen(
-          Effect.forEach(input.scales, (scale) =>
-            page.viewportImage(input.height, scale / deviceScaleFactor),
+          Effect.forEach(input.regions, (region) =>
+            page.regionImage(region.y, region.height, region.scale / deviceScaleFactor),
           ),
         ),
         Effect.ensuring(page.close),

@@ -19,7 +19,9 @@ its own when proactive panels are on. The menu at the top left switches between 
   scrolling to zoom. **1** fits everything and **0** goes to 100%. Double-click a screen to click
   around in it, and press Esc to return. Designs with several pages show a page menu. Screens show
   as preview images, made by the same headless browser as the previews above, and run as live
-  pages once you zoom close to one. Until that browser is downloaded, screens show their names.
+  pages once you zoom close to one. While Artifacts is open, previews for the other artifacts are
+  prepared in the background, so switching to one is quick. Until that browser is downloaded,
+  screens show their names.
 - **Web pages** (a folder with an `index.html`) open full size and work like a page in a browser.
 - **Design systems** (a `tokens.json` with a `README.md` and `components/`, as copied from Claude
   Design) show their guide, colors, type, spacing, radius, shadows and component previews, with a

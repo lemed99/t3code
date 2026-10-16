@@ -9,7 +9,7 @@ import {
   SECTION_GAP,
   UNLISTED_SECTION_TITLE,
   designChangesOfItems,
-  detailFrameKeys,
+  detailTiles,
   gridTransform,
   findClaudeDesignCanvases,
   fitViewToRect,
@@ -419,24 +419,40 @@ describe("screenThumbnailSrc", () => {
   });
 });
 
-describe("detailFrameKeys", () => {
-  const frames = [0, 500, 20_000].map((x, index) => ({
-    key: `f${index}`,
-    file: `f${index}.html`,
-    title: "f",
-    width: 400,
-    height: 800,
-    scroll: false,
-    x,
-    y: 0,
-  }));
-  it("asks for sharp images only past what the overview holds, and only on screen", () => {
+describe("detailTiles", () => {
+  const frames = [
+    {
+      key: "desk",
+      file: "d.html",
+      title: "d",
+      width: 1440,
+      height: 7547,
+      scroll: false,
+      x: 0,
+      y: 0,
+    },
+    {
+      key: "far",
+      file: "f.html",
+      title: "f",
+      width: 390,
+      height: 844,
+      scroll: false,
+      x: 50_000,
+      y: 0,
+    },
+  ];
+  it("asks only for the tiles in view, once the overview is not enough", () => {
     const viewport = { width: 1000, height: 900 };
-    expect(detailFrameKeys(frames, { x: 0, y: 0, zoom: 0.4 }, viewport, 1).size).toBe(0);
-    // The same zoom on a 2x display shows twice the pixels.
-    expect([...detailFrameKeys(frames, { x: 0, y: 0, zoom: 0.4 }, viewport, 2)].toSorted()).toEqual(
-      ["f0", "f1"],
-    );
+    // At 40% on a 1x display the half-scale overview holds every pixel shown.
+    expect(detailTiles(frames, { x: 0, y: 0, zoom: 0.4 }, viewport, 1).size).toBe(0);
+    // At 150% on a 2x display the view covers y 0-600, 900 with its margin: tile 0 only.
+    expect([...detailTiles(frames, { x: 0, y: 0, zoom: 1.5 }, viewport, 2)]).toEqual([
+      ["desk", [0]],
+    ]);
+    // Scrolled to the page's bottom, only its last tiles.
+    const bottom = detailTiles(frames, { x: 0, y: -7000 * 1.5, zoom: 1.5 }, viewport, 2);
+    expect(bottom.get("desk")).toEqual([6, 7]);
   });
 });
 

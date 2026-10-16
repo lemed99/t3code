@@ -404,15 +404,26 @@ export const withUntracedRequests = Layer.provide(layerUntracedRequests);
 
 /**
  * `?thumbnail&w=390&h=844` asks for an image of an HTML screen instead of the
- * page: a light overview image, or with `&detail` one sharp at its own size.
+ * page: the whole screen at half scale, or with `&tile=N` one sharp band of it.
  */
 const screenThumbnailSize = (params: URLSearchParams) => {
   if (!params.has("thumbnail")) return null;
   const width = Number(params.get("w"));
   const height = Number(params.get("h"));
-  return Number.isFinite(width) && Number.isFinite(height) && width >= 16 && height >= 16
-    ? { width, height, detail: params.has("detail") ? ("detail" as const) : ("overview" as const) }
-    : null;
+  const tile = params.has("tile") ? Number(params.get("tile")) : null;
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width < 16 || height < 16) return null;
+  if (
+    tile !== null &&
+    (!Number.isInteger(tile) || tile < 0 || tile >= ScreenThumbnails.tileCount(height))
+  ) {
+    return null;
+  }
+  return {
+    width,
+    height,
+    image:
+      tile === null ? ({ _tag: "Overview" } as const) : ({ _tag: "Tile", index: tile } as const),
+  };
 };
 
 // Route handlers only see request services, so the thumbnail service is taken
@@ -454,7 +465,8 @@ export const layerAssetRoute = Layer.unwrap(
             pagePath: `${assetPath}${fragment ? `#${encodeURIComponent(fragment)}` : ""}`,
             width: thumbnail.width,
             height: thumbnail.height,
-            detail: thumbnail.detail,
+            image: thumbnail.image,
+            background: url.value.searchParams.has("background"),
             resolveFile: (relativePath) =>
               resolveAsset(token, encodeURIComponent(relativePath)).pipe(
                 Effect.map((resolved) => (resolved?.kind === "file" ? resolved.path : null)),

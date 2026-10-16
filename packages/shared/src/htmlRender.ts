@@ -22,6 +22,18 @@ export interface HtmlRenderReference {
 export const HTML_RENDER_MEASURE_WIDTHS = [320, 375, 430, 520, 640, 728, 860, 1000, 1144] as const;
 
 export const HTML_RENDER_COLUMN_WIDTH = 728;
+/**
+ * Height in CSS pixels of each sharp tile of a design screen's preview: the
+ * server captures them and the canvas shows the ones in view.
+ */
+export const SCREEN_PREVIEW_TILE_HEIGHT = 1024;
+
+/**
+ * Image pixels per CSS pixel of a design screen's overview image: half scale,
+ * kept under the 8k pixels a side that image formats and GPUs handle well.
+ */
+export const screenPreviewOverviewScale = (width: number, height: number) =>
+  Math.min(0.5, 8_192 / width, 8_192 / height);
 
 const MAX_MEASURED_HEIGHTS = 24;
 
