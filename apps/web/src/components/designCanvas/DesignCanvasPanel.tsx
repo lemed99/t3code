@@ -50,11 +50,16 @@ import {
   type PlacedFrame,
   fitViewToRect,
   layoutDesignPage,
+  detailFrameKeys,
+  gridTransform,
   liveFrameKeys,
+  liveFrameMinWidth,
   parseClaudeDesignCanvas,
   parseDesignManifest,
   screenFrameSrc,
+  screenThumbnailSrc,
   screenTitleFromFile,
+  stepLiveFrames,
   wheelZoomFactor,
   withUnlistedScreens,
   zoomViewAt,
@@ -80,6 +85,13 @@ import {
 const TOOLBAR_SPACE = 52;
 /** Below this zoom frame labels would crowd each other and the headings. */
 const LABEL_MIN_ZOOM = 0.12;
+/** A screen's preview is retried this often before it is given up on. */
+const PREVIEW_RETRIES = 3;
+const PREVIEW_RETRY_MS = 15_000;
+/** Spacing of the dot grid at its densest; it doubles as the zoom halves. */
+const GRID_TILE = 24;
+/** Between steps that start more live pages. */
+const LIVE_STEP_MS = 120;
 /** How long a pan or zoom gesture pauses before the canvas catches up on details. */
 const GESTURE_SETTLE_MS = 150;
 
@@ -440,20 +452,33 @@ function DesignBoard(
   }, [layout.frames]);
 
   const viewportRef = useRef<HTMLDivElement>(null);
-  // Screens run as live pages only while on screen and big enough to see.
+  // Screens show as preview images, and run as live pages only on screen and
+  // near their own size (or, without a preview, once big enough to see).
   const [liveKeys, setLiveKeys] = useState<ReadonlySet<string>>(() => new Set());
   const liveKeysRef = useRef(liveKeys);
   const liveFrameRequest = useRef(0);
+  const liveStepTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshLiveRef = useRef<() => void>(() => {});
+  const previewFailedRef = useRef(new Set<string>());
+  const markPreviewFailed = useCallback((key: string) => {
+    previewFailedRef.current.add(key);
+    refreshLiveRef.current();
+  }, []);
+  // Screens close enough to show more than their overview image holds.
+  const [detailKeys, setDetailKeys] = useState<ReadonlySet<string>>(() => new Set());
   const worldRef = useRef<HTMLDivElement>(null);
+  const gridRef = useRef<HTMLDivElement>(null);
   const labelsRef = useRef<HTMLDivElement>(null);
+  const labelLayerRef = useRef<HTMLDivElement>(null);
+  const labelZoomRef = useRef<number | null>(null);
+  const layoutFramesRef = useRef(layout.frames);
+  const labelElementsRef = useRef(new Map<string, HTMLElement>());
+  // What fits in each label follows the settled zoom, not every frame's.
+  const [labelZoom, setLabelZoom] = useState(saved?.view.zoom ?? 1);
   const viewRef = useRef<CanvasView | null>(saved?.view ?? null);
   // Measured on resize, so gestures never force a layout to read it.
   const viewportSizeRef = useRef(viewportSize(null));
-  // The zoom labels are sized for: the last settled one, not every frame's.
-  const [labelZoom, setLabelZoom] = useState(1);
   const zoomReadoutRef = useRef<HTMLSpanElement>(null);
-  const [tiny, setTiny] = useState(false);
   const [liveKey, setLiveKey] = useState<string | null>(null);
   useEffect(() => {
     refreshLiveRef.current = () => {
@@ -462,17 +487,32 @@ function DesignBoard(
         liveFrameRequest.current = 0;
         const view = viewRef.current;
         if (!view) return;
-        const next = liveFrameKeys(
+        const viewport = viewportSizeRef.current;
+        const target = liveFrameKeys(
           layout.frames,
           view,
-          viewportSizeRef.current,
+          viewport,
           liveKeysRef.current,
           liveKey,
+          (frame) => liveFrameMinWidth(frame, !previewFailedRef.current.has(frame.key)),
         );
+        // Pages start a few at a time; the previews cover the rest meanwhile.
+        const { next, done } = stepLiveFrames(liveKeysRef.current, target);
+        if (liveStepTimer.current !== null) clearTimeout(liveStepTimer.current);
+        liveStepTimer.current = done
+          ? null
+          : setTimeout(() => refreshLiveRef.current(), LIVE_STEP_MS);
         const current = liveKeysRef.current;
-        if (next.size === current.size && [...next].every((key) => current.has(key))) return;
-        liveKeysRef.current = next;
-        setLiveKeys(next);
+        if (next.size !== current.size || [...next].some((key) => !current.has(key))) {
+          liveKeysRef.current = next;
+          setLiveKeys(next);
+        }
+        const detail = detailFrameKeys(layout.frames, view, viewport, window.devicePixelRatio);
+        setDetailKeys((previous) =>
+          previous.size === detail.size && [...detail].every((key) => previous.has(key))
+            ? previous
+            : detail,
+        );
       });
     };
     refreshLiveRef.current();
@@ -481,6 +521,7 @@ function DesignBoard(
     () => () => {
       cancelAnimationFrame(liveFrameRequest.current);
       liveFrameRequest.current = 0;
+      if (liveStepTimer.current !== null) clearTimeout(liveStepTimer.current);
     },
     [],
   );
@@ -489,24 +530,20 @@ function DesignBoard(
   // with an animation, so the first measurement is rarely the final one.
   const autoFitRef = useRef(saved === undefined);
 
-  // A gesture moves only the canvas layer, which the GPU composites without
-  // touching the page. What depends on the zoom (label sizes, the zoom
-  // readout, which screens run live) updates once the gesture pauses:
-  // changing it every frame restyles every screen on the canvas.
+  // A gesture changes only transforms and a few variables on small layers, so
+  // every frame is composited without restyling the screens. Which screens
+  // run live, and which get sharper images, is decided once the gesture pauses.
   const paintRequest = useRef(0);
   const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const settledZoom = useRef<number | null>(null);
   const settleView = useCallback(() => {
     if (settleTimer.current !== null) clearTimeout(settleTimer.current);
     settleTimer.current = null;
     const view = viewRef.current;
     if (!view) return;
-    if (labelsRef.current) labelsRef.current.style.visibility = "";
-    if (settledZoom.current !== view.zoom) {
-      settledZoom.current = view.zoom;
-      setLabelZoom(view.zoom);
-      setTiny(view.zoom < LABEL_MIN_ZOOM);
-    }
+    // A promoted layer keeps the resolution it was drawn at, so a zoom leaves
+    // it blurry; dropping the hint redraws it sharp at the new scale.
+    if (worldRef.current) worldRef.current.style.willChange = "auto";
+    setLabelZoom(view.zoom);
     refreshLiveRef.current();
     savedViews.set(viewKey, { page: pageIndex, view });
   }, [pageIndex, viewKey]);
@@ -515,23 +552,44 @@ function DesignBoard(
     paintRequest.current = 0;
     const view = viewRef.current;
     const world = worldRef.current;
-    const viewport = viewportRef.current;
     if (!view) return;
     if (world) world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
     if (zoomReadoutRef.current) {
       zoomReadoutRef.current.textContent = `${Math.round(view.zoom * 100)}%`;
     }
-    if (viewport) {
-      let dot = 24 * view.zoom;
-      while (dot < 12) dot *= 2;
-      viewport.style.backgroundSize = `${dot}px ${dot}px`;
-      viewport.style.backgroundPosition = `${view.x}px ${view.y}px`;
-    }
-    // Labels keep their screen size by scaling against the zoom; while it
-    // changes they would lag behind, so they step aside until it settles.
+    const grid = gridRef.current;
+    if (grid) grid.style.transform = gridTransform(view);
+    // Labels: a pan moves their layer on the GPU. A zoom moves each label on
+    // screen by its own transform (a variable they inherited would restyle
+    // every element inside every label), and labels off screen stay hidden.
     const labels = labelsRef.current;
-    if (labels && settledZoom.current !== view.zoom && labels.style.visibility !== "hidden") {
-      labels.style.visibility = "hidden";
+    const labelLayer = labelLayerRef.current;
+    if (!labels || !labelLayer) return;
+    labelLayer.style.transform = `translate(${view.x}px, ${view.y}px)`;
+    const hidden = view.zoom < LABEL_MIN_ZOOM;
+    if (labels.hidden !== hidden) labels.hidden = hidden;
+    if (hidden) return;
+    const zoomChanged = labelZoomRef.current !== view.zoom;
+    labelZoomRef.current = view.zoom;
+    const { width, height } = viewportSizeRef.current;
+    for (const frame of layoutFramesRef.current) {
+      const label = labelElementsRef.current.get(frame.key);
+      if (!label) continue;
+      const left = frame.x * view.zoom + view.x;
+      const top = frame.y * view.zoom + view.y;
+      const onScreen =
+        left < width &&
+        left + frame.width * view.zoom > 0 &&
+        top - 32 < height &&
+        top > -frame.height * view.zoom;
+      if (!onScreen) {
+        if (label.style.visibility !== "hidden") label.style.visibility = "hidden";
+        continue;
+      }
+      if (zoomChanged || label.style.visibility === "hidden") {
+        label.style.transform = `translate(${frame.x * view.zoom}px, ${frame.y * view.zoom}px) translateY(-100%)`;
+      }
+      if (label.style.visibility === "hidden") label.style.visibility = "";
     }
   }, []);
 
@@ -545,6 +603,9 @@ function DesignBoard(
         settleView();
         return;
       }
+      // Moving as one GPU layer for the length of the gesture.
+      const world = worldRef.current;
+      if (world && world.style.willChange !== "transform") world.style.willChange = "transform";
       // Trackpads send several events per frame; draw once per frame.
       if (!paintRequest.current) paintRequest.current = requestAnimationFrame(paintView);
       if (settleTimer.current !== null) clearTimeout(settleTimer.current);
@@ -598,6 +659,20 @@ function DesignBoard(
     },
     [applyView],
   );
+
+  // The labels paintView places: found once per layout, not on every frame.
+  useLayoutEffect(() => {
+    layoutFramesRef.current = layout.frames;
+    const elements = new Map<string, HTMLElement>();
+    for (const element of labelLayerRef.current?.children ?? []) {
+      if (element instanceof HTMLElement && element.dataset.frameKey) {
+        elements.set(element.dataset.frameKey, element);
+      }
+    }
+    labelElementsRef.current = elements;
+    labelZoomRef.current = null;
+    paintView();
+  }, [layout.frames, paintView]);
 
   // First paint of a page: restore the saved view, or fit everything.
   const initializedPageRef = useRef<number | null>(null);
@@ -785,12 +860,20 @@ function DesignBoard(
           onPointerCancel={onPointerEnd}
           onDoubleClick={onDoubleClick}
           onKeyDown={onKeyDown}
-          style={{ backgroundImage: "radial-gradient(var(--color-border) 1px, transparent 1px)" }}
         >
+          {/* Twice the panel plus a tile, so its transform can cover it at any spacing. */}
           <div
-            ref={worldRef}
-            className="absolute top-0 left-0 origin-top-left will-change-transform"
-          >
+            ref={gridRef}
+            aria-hidden
+            className="pointer-events-none absolute top-0 left-0 origin-top-left will-change-transform"
+            style={{
+              width: `calc(200% + ${GRID_TILE * 2}px)`,
+              height: `calc(200% + ${GRID_TILE * 2}px)`,
+              backgroundImage: "radial-gradient(var(--color-border) 1.25px, transparent 1.25px)",
+              backgroundSize: `${GRID_TILE}px ${GRID_TILE}px`,
+            }}
+          />
+          <div ref={worldRef} className="absolute top-0 left-0 origin-top-left">
             {layout.headings.map((heading) => (
               <h2
                 key={heading.key}
@@ -813,23 +896,25 @@ function DesignBoard(
                 designRevision={props.designRevision}
                 live={frame.key === liveKey}
                 mounted={liveKeys.has(frame.key)}
+                detail={detailKeys.has(frame.key)}
                 selected={frame.key === selectedKey}
+                onPreviewFailed={markPreviewFailed}
               />
             ))}
-            <div ref={labelsRef} className="absolute top-0 left-0">
-              {tiny
-                ? null
-                : layout.frames.map((frame) => (
-                    <FrameLabel
-                      key={frame.key}
-                      frame={frame}
-                      relativePath={`${props.root}/${frame.file.split("#", 1)[0]}`}
-                      accent={frame.key === liveKey || frame.key === selectedKey}
-                      labelZoom={labelZoom}
-                      onOpenFile={props.onOpenFile}
-                      onZoomTo={zoomToFrame}
-                    />
-                  ))}
+          </div>
+          <div ref={labelsRef} className="pointer-events-none absolute inset-0 overflow-hidden">
+            <div ref={labelLayerRef} className="absolute top-0 left-0 will-change-transform">
+              {layout.frames.map((frame) => (
+                <FrameLabel
+                  key={frame.key}
+                  frame={frame}
+                  relativePath={`${props.root}/${frame.file.split("#", 1)[0]}`}
+                  accent={frame.key === liveKey || frame.key === selectedKey}
+                  width={Math.round(frame.width * labelZoom)}
+                  onOpenFile={props.onOpenFile}
+                  onZoomTo={zoomToFrame}
+                />
+              ))}
             </div>
           </div>
         </div>
@@ -917,15 +1002,16 @@ function siblingAssetUrl(url: string, file: string): string {
 }
 
 /**
- * A screen's name above it, kept at the same size on screen whatever the zoom.
- * Labels live in their own layer so resizing them after a zoom, or hiding
- * them during one, touches nothing else on the canvas.
+ * A screen's name above it, the same size on screen at any zoom. The board
+ * places labels in screen space; their width, and what fits in it, follows
+ * the settled zoom, so a gesture neither lays them out nor re-renders them.
  */
 const FrameLabel = memo(function FrameLabel(props: {
   readonly frame: PlacedFrame;
   readonly relativePath: string;
   readonly accent: boolean;
-  readonly labelZoom: number;
+  /** On-screen width at the settled zoom. */
+  readonly width: number;
   readonly onOpenFile: (relativePath: string) => void;
   readonly onZoomTo: (frame: PlacedFrame) => void;
 }) {
@@ -933,34 +1019,30 @@ const FrameLabel = memo(function FrameLabel(props: {
   return (
     <div
       data-frame-key={frame.key}
-      className="absolute"
-      style={{ left: frame.x, top: frame.y, width: frame.width }}
+      className={cn(
+        "pointer-events-auto absolute top-0 left-0 flex h-[26px] items-center gap-1 text-xs whitespace-nowrap text-muted-foreground",
+        props.accent && "text-primary",
+      )}
+      // Placed (and hidden off screen) by the board's paintView, outside React.
+      style={{ width: props.width, visibility: "hidden" }}
+      onDoubleClick={(event) => {
+        event.stopPropagation();
+        props.onZoomTo(frame);
+      }}
     >
-      <div
-        className={cn(
-          "@container absolute bottom-full left-0 flex h-[26px] origin-bottom-left items-center gap-1 text-xs whitespace-nowrap text-muted-foreground",
-          props.accent && "text-primary",
-        )}
-        style={{
-          width: frame.width * props.labelZoom,
-          transform: `scale(${1 / props.labelZoom})`,
-        }}
-        onDoubleClick={(event) => {
-          event.stopPropagation();
-          props.onZoomTo(frame);
-        }}
-      >
-        <span className="min-w-0 flex-1 truncate">{frame.title}</span>
-        <span className="tabular-nums opacity-70 @max-[240px]:hidden">
+      <span className="min-w-0 flex-1 truncate">{frame.title}</span>
+      {props.width > 240 ? (
+        <span className="tabular-nums opacity-70">
           {frame.width} × {frame.height}
         </span>
+      ) : null}
+      {props.width > 110 ? (
         <Tooltip>
           <TooltipTrigger
             render={
               <Button
                 size="icon-xs"
                 variant="ghost-muted"
-                className="@max-[110px]:hidden"
                 aria-label={`Open ${relativePath}`}
                 onClick={() => props.onOpenFile(relativePath)}
               />
@@ -970,7 +1052,7 @@ const FrameLabel = memo(function FrameLabel(props: {
           </TooltipTrigger>
           <TooltipPopup>Open the screen's file</TooltipPopup>
         </Tooltip>
-      </div>
+      ) : null}
     </div>
   );
 });
@@ -986,9 +1068,12 @@ const DesignFrameView = memo(function DesignFrameView(props: {
   readonly draft: boolean;
   readonly designRevision: string | null;
   readonly live: boolean;
-  /** Runs as a live page; otherwise a light placeholder stands in. */
+  /** Runs as a live page over its preview image. */
   readonly mounted: boolean;
+  /** Shown large enough to need the sharp preview image. */
+  readonly detail: boolean;
   readonly selected: boolean;
+  readonly onPreviewFailed: (key: string) => void;
 }) {
   const { frame } = props;
   const relativePath = `${props.root}/${frame.file.split("#", 1)[0]}`;
@@ -1010,24 +1095,68 @@ const DesignFrameView = memo(function DesignFrameView(props: {
     [props.threadRef, props.draft, props.cwd, tokenPath],
   );
   const assetUrl = useAssetUrlState(props.environmentId, resource);
-  // Keep one URL per revision: a re-minted token alone must not reload the screen.
-  const [src, setSrc] = useState<{ revision: string | null; url: string } | null>(null);
+  // One set of URLs per revision: a re-minted token alone must not reload anything.
+  const [src, setSrc] = useState<{
+    readonly revision: string | null;
+    readonly page: string;
+    readonly preview: string;
+  } | null>(null);
   const liveUrl = assetUrl._tag === "Success" ? assetUrl.url : null;
   useEffect(() => {
     if (liveUrl === null) return;
-    setSrc((current) =>
-      current !== null && current.revision === props.designRevision
-        ? current
-        : {
-            revision: props.designRevision,
-            url: screenFrameSrc(
-              siblingAssetUrl(liveUrl, frame.file),
-              frame.file,
-              props.designRevision,
-            ),
-          },
+    setSrc((current) => {
+      if (current !== null && current.revision === props.designRevision) return current;
+      const fileUrl = siblingAssetUrl(liveUrl, frame.file);
+      return {
+        revision: props.designRevision,
+        page: screenFrameSrc(fileUrl, frame.file, props.designRevision),
+        preview: screenThumbnailSrc(fileUrl, frame, props.designRevision),
+      };
+    });
+  }, [liveUrl, frame, props.designRevision]);
+
+  // The server answers 503 while its browser installs; a few retries cover that.
+  const [previewAttempt, setPreviewAttempt] = useState(0);
+  const [previewFailed, setPreviewFailed] = useState(false);
+  const retryTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (retryTimer.current !== null) clearTimeout(retryTimer.current);
+    },
+    [],
+  );
+  const { onPreviewFailed } = props;
+  const onPreviewError = useCallback(() => {
+    if (previewAttempt >= PREVIEW_RETRIES) {
+      setPreviewFailed(true);
+      onPreviewFailed(frame.key);
+      return;
+    }
+    retryTimer.current = setTimeout(
+      () => setPreviewAttempt((attempt) => attempt + 1),
+      PREVIEW_RETRY_MS,
     );
-  }, [liveUrl, frame.file, props.designRevision]);
+  }, [previewAttempt, onPreviewFailed, frame.key]);
+  const previewUrl =
+    src === null || previewFailed
+      ? null
+      : `${src.preview}${previewAttempt === 0 ? "" : `&attempt=${previewAttempt}`}`;
+  // The sharp image stays once loaded, so zooming back out never blurs it again.
+  const [wantDetail, setWantDetail] = useState(props.detail);
+  if (props.detail && !wantDetail) setWantDetail(true);
+  const [loaded, setLoaded] = useState<{
+    overview: string | null;
+    detail: string | null;
+    page: string | null;
+  }>({
+    overview: null,
+    detail: null,
+    page: null,
+  });
+  const detailUrl = previewUrl === null ? null : `${previewUrl}&detail`;
+  // A page that leaves must load again before it covers its preview next time.
+  if (!props.mounted && loaded.page !== null) setLoaded((current) => ({ ...current, page: null }));
+  const pageShown = props.mounted && src !== null && loaded.page === src.page;
 
   const accent = props.live || props.selected;
   return (
@@ -1042,7 +1171,11 @@ const DesignFrameView = memo(function DesignFrameView(props: {
           accent && "outline-2 outline-primary",
         )}
       >
-        {!props.mounted ? (
+        {assetUrl._tag === "Failure" ? (
+          <div className="flex size-full items-center justify-center p-6 text-center text-2xl text-muted-foreground">
+            Couldn't load {relativePath}
+          </div>
+        ) : (
           <div
             aria-hidden
             className="flex size-full items-center justify-center bg-muted/60 text-center leading-tight text-muted-foreground"
@@ -1050,22 +1183,45 @@ const DesignFrameView = memo(function DesignFrameView(props: {
           >
             {frame.title}
           </div>
-        ) : src ? (
+        )}
+        {previewUrl !== null && !pageShown ? (
+          <img
+            src={previewUrl}
+            alt=""
+            draggable={false}
+            decoding="async"
+            className={cn(
+              "absolute inset-0 size-full",
+              loaded.overview !== previewUrl && "invisible",
+            )}
+            onLoad={() => setLoaded((current) => ({ ...current, overview: previewUrl }))}
+            onError={onPreviewError}
+          />
+        ) : null}
+        {detailUrl !== null && wantDetail && !pageShown ? (
+          <img
+            src={detailUrl}
+            alt=""
+            draggable={false}
+            decoding="async"
+            className={cn("absolute inset-0 size-full", loaded.detail !== detailUrl && "invisible")}
+            onLoad={() => setLoaded((current) => ({ ...current, detail: detailUrl }))}
+          />
+        ) : null}
+        {props.mounted && src !== null ? (
           <iframe
-            src={src.url}
+            src={src.page}
             title={frame.title}
             sandbox="allow-scripts allow-forms allow-popups allow-downloads"
-            loading="lazy"
             scrolling={frame.scroll ? "auto" : "no"}
+            // Hidden until it has painted, so the preview never gives way to a blank page.
             className={cn(
-              "block size-full border-0 bg-white",
+              "absolute inset-0 block size-full border-0 bg-white",
+              !pageShown && "opacity-0",
               !props.live && "pointer-events-none",
             )}
+            onLoad={() => setLoaded((current) => ({ ...current, page: src.page }))}
           />
-        ) : assetUrl._tag === "Failure" ? (
-          <div className="flex size-full items-center justify-center p-6 text-center text-2xl text-muted-foreground">
-            Couldn't load {relativePath}
-          </div>
         ) : null}
       </div>
     </div>

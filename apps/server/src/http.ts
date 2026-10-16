@@ -30,6 +30,7 @@ import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
 import * as ServerConfig from "./config.ts";
 import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
+import * as ScreenThumbnails from "./htmlRender/ScreenThumbnails.ts";
 import { githubMediaResponse } from "./assets/GitHubMediaFetch.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
 import {
@@ -401,55 +402,115 @@ const layerUntracedRequests = Layer.succeed(HttpMiddleware.TracerDisabledWhen)((
 
 export const withUntracedRequests = Layer.provide(layerUntracedRequests);
 
-export const layerAssetRoute = HttpRouter.add(
-  "GET",
-  `${ASSET_ROUTE_PREFIX}/*`,
+/**
+ * `?thumbnail&w=390&h=844` asks for an image of an HTML screen instead of the
+ * page: a light overview image, or with `&detail` one sharp at its own size.
+ */
+const screenThumbnailSize = (params: URLSearchParams) => {
+  if (!params.has("thumbnail")) return null;
+  const width = Number(params.get("w"));
+  const height = Number(params.get("h"));
+  return Number.isFinite(width) && Number.isFinite(height) && width >= 16 && height >= 16
+    ? { width, height, detail: params.has("detail") ? ("detail" as const) : ("overview" as const) }
+    : null;
+};
+
+// Route handlers only see request services, so the thumbnail service is taken
+// when the route is built.
+export const layerAssetRoute = Layer.unwrap(
   Effect.gen(function* () {
-    const request = yield* HttpServerRequest.HttpServerRequest;
-    const url = HttpServerRequest.toURL(request);
-    if (Option.isNone(url)) {
-      return HttpServerResponse.text("Bad Request", { status: 400 });
-    }
+    const thumbnails = yield* ScreenThumbnails.ScreenThumbnails;
+    return HttpRouter.add(
+      "GET",
+      `${ASSET_ROUTE_PREFIX}/*`,
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const url = HttpServerRequest.toURL(request);
+        if (Option.isNone(url)) {
+          return HttpServerResponse.text("Bad Request", { status: 400 });
+        }
 
-    const suffix = url.value.pathname.slice(`${ASSET_ROUTE_PREFIX}/`.length);
-    const separatorIndex = suffix.indexOf("/");
-    if (separatorIndex <= 0) {
-      return HttpServerResponse.text("Not Found", { status: 404 });
-    }
+        const suffix = url.value.pathname.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        const separatorIndex = suffix.indexOf("/");
+        if (separatorIndex <= 0) {
+          return HttpServerResponse.text("Not Found", { status: 404 });
+        }
 
-    const asset = yield* resolveAsset(
-      suffix.slice(0, separatorIndex),
-      suffix.slice(separatorIndex + 1),
-    );
-    if (!asset) {
-      return HttpServerResponse.text("Not Found", { status: 404 });
-    }
-    if (asset.kind === "bytes") {
-      return HttpServerResponse.uint8Array(asset.bytes, {
-        contentType: asset.mimeType,
-        headers: { "cache-control": "private, max-age=3600", "x-content-type-options": "nosniff" },
-      });
-    }
-    if (asset.kind === "github-media") {
-      return yield* githubMediaResponse(asset, request.headers).pipe(
-        Effect.tapError((cause) =>
-          Effect.logWarning("Failed to fetch GitHub media.", { url: asset.url, cause }),
-        ),
-        Effect.orElseSucceed(() =>
-          HttpServerResponse.empty({
-            status: 502,
-            headers: { "cache-control": "private, no-store", "x-content-type-options": "nosniff" },
-          }),
-        ),
-      );
-    }
-    return yield* assetFileResponse(
-      asset,
-      request.method === "GET" ? request.headers.range : undefined,
-      request.headers["if-range"],
-      request.method === "HEAD" ? "HEAD" : "GET",
-    ).pipe(
-      Effect.orElseSucceed(() => HttpServerResponse.text("Internal Server Error", { status: 500 })),
+        const token = suffix.slice(0, separatorIndex);
+        const assetPath = suffix.slice(separatorIndex + 1);
+        const asset = yield* resolveAsset(token, assetPath);
+        if (!asset) {
+          return HttpServerResponse.text("Not Found", { status: 404 });
+        }
+        const thumbnail = screenThumbnailSize(url.value.searchParams);
+        if (thumbnail !== null && asset.kind === "file" && /\.html?$/i.test(asset.path)) {
+          // The screen loads its files under the same token, so it can reach
+          // exactly what its live page could.
+          const services =
+            yield* Effect.context<Effect.Services<ReturnType<typeof resolveAsset>>>();
+          const fragment = url.value.searchParams.get("fragment");
+          const result = yield* thumbnails.thumbnail({
+            filePath: asset.path,
+            pagePath: `${assetPath}${fragment ? `#${encodeURIComponent(fragment)}` : ""}`,
+            width: thumbnail.width,
+            height: thumbnail.height,
+            detail: thumbnail.detail,
+            resolveFile: (relativePath) =>
+              resolveAsset(token, encodeURIComponent(relativePath)).pipe(
+                Effect.map((resolved) => (resolved?.kind === "file" ? resolved.path : null)),
+                Effect.provideContext(services),
+              ),
+          });
+          return result._tag === "Image"
+            ? HttpServerResponse.uint8Array(result.bytes, {
+                contentType: "image/webp",
+                // Thumbnail URLs carry the workspace revision, so a cached one is never stale.
+                headers: {
+                  "cache-control": "private, max-age=86400",
+                  "x-content-type-options": "nosniff",
+                },
+              })
+            : HttpServerResponse.empty({
+                status: 503,
+                headers: { "cache-control": "no-store", "retry-after": "15" },
+              });
+        }
+        if (asset.kind === "bytes") {
+          return HttpServerResponse.uint8Array(asset.bytes, {
+            contentType: asset.mimeType,
+            headers: {
+              "cache-control": "private, max-age=3600",
+              "x-content-type-options": "nosniff",
+            },
+          });
+        }
+        if (asset.kind === "github-media") {
+          return yield* githubMediaResponse(asset, request.headers).pipe(
+            Effect.tapError((cause) =>
+              Effect.logWarning("Failed to fetch GitHub media.", { url: asset.url, cause }),
+            ),
+            Effect.orElseSucceed(() =>
+              HttpServerResponse.empty({
+                status: 502,
+                headers: {
+                  "cache-control": "private, no-store",
+                  "x-content-type-options": "nosniff",
+                },
+              }),
+            ),
+          );
+        }
+        return yield* assetFileResponse(
+          asset,
+          request.method === "GET" ? request.headers.range : undefined,
+          request.headers["if-range"],
+          request.method === "HEAD" ? "HEAD" : "GET",
+        ).pipe(
+          Effect.orElseSucceed(() =>
+            HttpServerResponse.text("Internal Server Error", { status: 500 }),
+          ),
+        );
+      }),
     );
   }),
 );

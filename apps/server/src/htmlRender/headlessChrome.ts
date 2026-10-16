@@ -42,6 +42,8 @@ const MAX_CONSOLE_TEXT_CHARS = 500;
 const VIEWPORT_HEIGHT = 800;
 const MAX_CAPTURE_HEIGHT = 4_000;
 const CAPTURE_TIMEOUT = "20 seconds";
+const SCREEN_LOAD_WAIT = "6 seconds";
+const SCREEN_SETTLE_WAIT = "2 seconds";
 // Chrome refuses local files to every web page, frame, worker, and popup, so a
 // page cannot read files the agent's provider withholds; local images reach it
 // already inlined as data URIs. `.localhost` keeps it a secure context that may
@@ -238,9 +240,17 @@ const Ignored = Schema.Unknown;
 const Navigation = Schema.Struct({ errorText: Schema.optional(Schema.String) });
 const Measured = Schema.Struct({ result: Schema.Struct({ value: Schema.Finite }) });
 
+/** A file a screen loads from its own folder, already scoped by the caller. */
+export interface ServedFile {
+  readonly bytes: Uint8Array;
+  readonly contentType: string;
+}
+
 interface PageEvents {
   readonly mainFrameId: string;
   body: Uint8Array | undefined;
+  /** Serves the page's origin from disk instead of a single in-memory body. */
+  readonly serve: ((path: string) => Effect.Effect<ServedFile | null>) | undefined;
   loaded: Deferred.Deferred<void, BrowserFailure> | undefined;
   readonly consoleMessages: Array<ConsoleMessage>;
   omittedConsoleMessages: number;
@@ -373,6 +383,33 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       if (url === PAGE_URL && body !== undefined) {
         return fulfillPage(sessionId, paused.requestId, body);
       }
+      const serve = page.serve;
+      if (serve !== undefined && url.startsWith(`${PAGE_ORIGIN}/`)) {
+        // Off the receive loop: reading a file must not hold up other replies.
+        return serve(decodeURIComponent(new URL(url).pathname.slice(1))).pipe(
+          Effect.flatMap((file) =>
+            file === null
+              ? post(
+                  "Fetch.fulfillRequest",
+                  { requestId: paused.requestId, responseCode: 404, body: "" },
+                  sessionId,
+                )
+              : post(
+                  "Fetch.fulfillRequest",
+                  {
+                    requestId: paused.requestId,
+                    responseCode: 200,
+                    responseHeaders: [{ name: "Content-Type", value: file.contentType }],
+                    body: Buffer.from(file.bytes).toString("base64"),
+                  },
+                  sessionId,
+                ),
+          ),
+          Effect.ignore,
+          Effect.forkChild,
+          Effect.asVoid,
+        );
+      }
       // A frame inside the page may show another site; Local Network Access
       // still covers it. The main frame and T3's own origin serve nothing else.
       const otherSiteFrame =
@@ -468,7 +505,14 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       );
     });
 
-  const openPage = Effect.fnUntraced(function* (width: number) {
+  const openPage = Effect.fnUntraced(function* (
+    width: number,
+    options?: {
+      readonly height?: number;
+      readonly deviceScaleFactor?: number;
+      readonly serve?: (path: string) => Effect.Effect<ServedFile | null>;
+    },
+  ) {
     const { targetId } = yield* send(
       "Target.createTarget",
       { url: "about:blank" },
@@ -483,6 +527,7 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       // A page target's id is its main frame's id.
       mainFrameId: targetId,
       body: undefined,
+      serve: options?.serve,
       loaded: undefined,
       consoleMessages: [],
       omittedConsoleMessages: 0,
@@ -517,7 +562,12 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
     );
     yield* send(
       "Emulation.setDeviceMetricsOverride",
-      { width, height: VIEWPORT_HEIGHT, deviceScaleFactor: 1, mobile: false },
+      {
+        width,
+        height: options?.height ?? VIEWPORT_HEIGHT,
+        deviceScaleFactor: options?.deviceScaleFactor ?? 1,
+        mobile: false,
+      },
       Ignored,
       sessionId,
     );
@@ -550,6 +600,40 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       );
       return Math.max(0, Math.ceil(measured.result.value));
     });
+
+    /**
+     * Opens a file of the served origin, such as `screens/home.html#step-2`.
+     * A preview shows what the screen has drawn by then: a resource that hangs
+     * (a font from a slow network, say) caps the wait instead of failing it.
+     */
+    const loadPath = Effect.fnUntraced(function* (path: string) {
+      const loaded = yield* Deferred.make<void, BrowserFailure>();
+      events.loaded = loaded;
+      const navigation = yield* send(
+        "Page.navigate",
+        { url: `${PAGE_ORIGIN}/${path}` },
+        Navigation,
+        sessionId,
+      );
+      if (navigation.errorText) {
+        return yield* new HtmlRenderBrowserError({ reason: "the page could not be opened" });
+      }
+      yield* Deferred.await(loaded).pipe(Effect.timeoutOption(SCREEN_LOAD_WAIT));
+      yield* send(
+        "Runtime.evaluate",
+        { expression: SETTLE_EXPRESSION, awaitPromise: true },
+        Ignored,
+        sessionId,
+      ).pipe(Effect.timeoutOption(SCREEN_SETTLE_WAIT));
+    });
+
+    const viewportImage = (height: number, scale = 1) =>
+      send(
+        "Page.captureScreenshot",
+        { format: "webp", quality: 82, clip: { x: 0, y: 0, width, height, scale } },
+        Schema.Struct({ data: Schema.String }),
+        sessionId,
+      ).pipe(Effect.map(({ data }) => Buffer.from(data, "base64")));
 
     const screenshot = (height: number) =>
       send(
@@ -599,11 +683,69 @@ const launchBrowser = Effect.fnUntraced(function* (input: {
       ),
     );
 
-    return { load, outline, screenshot, consoleMessages, close };
+    return { load, loadPath, outline, screenshot, viewportImage, consoleMessages, close };
   });
 
   return { openPage };
 });
+
+export type ScreenBrowser = Effect.Success<ReturnType<typeof launchBrowser>>;
+
+/** A browser kept open for capturing many screens; it closes with the scope. */
+export const launchScreenBrowser = Effect.fn("headlessChrome.launchScreenBrowser")(
+  function* (input: { readonly executable: string; readonly noSandbox: boolean }) {
+    const path = yield* Path.Path;
+    const directory = yield* scratchDirectory;
+    return yield* launchBrowser({
+      executable: input.executable,
+      noSandbox: input.noSandbox,
+      profileDirectory: path.join(directory, "profile"),
+    });
+  },
+);
+
+/**
+ * A screen as it first appears at its own size, as WebP images at each of
+ * `scales` (pixels per CSS pixel), all from one load.
+ */
+export const captureScreen = Effect.fn("headlessChrome.captureScreen")(
+  function* (
+    browser: ScreenBrowser,
+    input: {
+      readonly path: string;
+      readonly width: number;
+      readonly height: number;
+      readonly scales: ReadonlyArray<number>;
+      readonly serve: (path: string) => Effect.Effect<ServedFile | null>;
+    },
+  ) {
+    const deviceScaleFactor = Math.max(...input.scales);
+    const page = yield* browser.openPage(input.width, {
+      height: input.height,
+      deviceScaleFactor,
+      serve: input.serve,
+    });
+    return yield* page
+      .loadPath(input.path)
+      .pipe(
+        Effect.andThen(
+          Effect.forEach(input.scales, (scale) =>
+            page.viewportImage(input.height, scale / deviceScaleFactor),
+          ),
+        ),
+        Effect.ensuring(page.close),
+      );
+  },
+  Effect.timeoutOrElse({
+    duration: CAPTURE_TIMEOUT,
+    orElse: () =>
+      Effect.fail(
+        new HtmlRenderBrowserError({
+          reason: `the page did not finish loading within ${CAPTURE_TIMEOUT}`,
+        }),
+      ),
+  }),
+);
 
 const scratchDirectory = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;

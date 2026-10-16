@@ -504,6 +504,87 @@ export function parseClaudeDesignCanvas(contents: string | null): DesignManifest
 export const MAX_LIVE_FRAMES = 40;
 /** Below this on-screen width a screen is too small to read, so it stays a placeholder. */
 export const MIN_LIVE_FRAME_WIDTH = 48;
+/**
+ * A screen with a preview image runs live only near its own size: further out
+ * the image looks the same and costs nothing to move.
+ */
+export const MIN_LIVE_SCALE_WITH_PREVIEW = 0.6;
+/** Live pages started per step, so a zoom never starts dozens of loads at once. */
+export const MAX_NEW_LIVE_FRAMES = 4;
+
+/** The on-screen width at which `frame` starts running as a live page. */
+export function liveFrameMinWidth(frame: PlacedFrame, hasPreview: boolean): number {
+  return hasPreview ? frame.width * MIN_LIVE_SCALE_WITH_PREVIEW : MIN_LIVE_FRAME_WIDTH;
+}
+
+/**
+ * The next live set on the way to `target`: frames leave at once, and at most
+ * `MAX_NEW_LIVE_FRAMES` join, nearest first as `target` is ordered.
+ */
+export function stepLiveFrames(
+  current: ReadonlySet<string>,
+  target: ReadonlySet<string>,
+): { readonly next: ReadonlySet<string>; readonly done: boolean } {
+  const next = new Set([...current].filter((key) => target.has(key)));
+  let added = 0;
+  for (const key of target) {
+    if (next.has(key)) continue;
+    if (added === MAX_NEW_LIVE_FRAMES) return { next, done: false };
+    next.add(key);
+    added += 1;
+  }
+  return { next, done: true };
+}
+
+/** Screens given a sharp preview image at once, nearest the center first. */
+export const MAX_DETAIL_FRAMES = 24;
+/** Pixels per CSS pixel of a screen's overview image. */
+export const OVERVIEW_IMAGE_SCALE = 0.5;
+
+/**
+ * Frames on screen shown with more device pixels than their overview image
+ * holds, so they need the sharp one.
+ */
+export function detailFrameKeys(
+  frames: ReadonlyArray<PlacedFrame>,
+  view: CanvasView,
+  viewport: { readonly width: number; readonly height: number },
+  devicePixelRatio: number,
+): ReadonlySet<string> {
+  if (view.zoom * devicePixelRatio <= OVERVIEW_IMAGE_SCALE) return new Set();
+  return liveFrameKeys(frames, view, viewport, new Set(), null, () => 0, MAX_DETAIL_FRAMES);
+}
+
+/**
+ * The dot grid's transform: its tile scaled to the zoomed spacing (kept
+ * between one and two tiles' worth by doubling or halving) and shifted by the
+ * pan, within one tile so a layer of fixed size always covers the panel.
+ */
+export function gridTransform(view: CanvasView, tile = 24): string {
+  let spacing = tile * view.zoom;
+  if (!(spacing > 0) || !Number.isFinite(spacing)) spacing = tile;
+  while (spacing < tile / 2) spacing *= 2;
+  while (spacing >= tile) spacing /= 2;
+  const offset = (value: number) => (((value % spacing) + spacing) % spacing) - spacing;
+  return `translate(${offset(view.x)}px, ${offset(view.y)}px) scale(${spacing / tile})`;
+}
+
+/** The image URL for a screen, from the asset URL of the screen itself. */
+export function screenThumbnailSrc(
+  assetUrl: string,
+  frame: { readonly file: string; readonly width: number; readonly height: number },
+  workspaceMutationId: string | null,
+): string {
+  const hashAt = frame.file.indexOf("#");
+  const params = new URLSearchParams({
+    thumbnail: "",
+    w: String(Math.round(frame.width)),
+    h: String(Math.round(frame.height)),
+  });
+  if (hashAt !== -1) params.set("fragment", frame.file.slice(hashAt + 1));
+  if (workspaceMutationId !== null) params.set("workspace-revision", workspaceMutationId);
+  return `${assetUrl}${assetUrl.includes("?") ? "&" : "?"}${params.toString()}`;
+}
 
 /**
  * Which frames run as live pages for this view: those on screen (with a
@@ -517,6 +598,8 @@ export function liveFrameKeys(
   viewport: { readonly width: number; readonly height: number },
   previous: ReadonlySet<string>,
   pinned: string | null,
+  minWidth: (frame: PlacedFrame) => number = () => MIN_LIVE_FRAME_WIDTH,
+  limit = MAX_LIVE_FRAMES,
 ): ReadonlySet<string> {
   if (view.zoom <= 0) return new Set(pinned ? [pinned] : []);
   const left = -view.x / view.zoom;
@@ -533,7 +616,7 @@ export function liveFrameKeys(
   const candidates = frames
     .filter(
       (frame) =>
-        frame.width * view.zoom >= MIN_LIVE_FRAME_WIDTH &&
+        frame.width * view.zoom >= minWidth(frame) &&
         within(frame, previous.has(frame.key) ? 1 : 0.5),
     )
     .map((frame) => ({
@@ -544,9 +627,8 @@ export function liveFrameKeys(
       ),
     }))
     .toSorted((a, b) => a.distance - b.distance)
-    .slice(0, MAX_LIVE_FRAMES)
+    .slice(0, limit)
     .map((entry) => entry.key);
-  const live = new Set(candidates);
-  if (pinned) live.add(pinned);
-  return live;
+  // The screen in use comes first, so it is never the one left waiting.
+  return new Set(pinned ? [pinned, ...candidates] : candidates);
 }

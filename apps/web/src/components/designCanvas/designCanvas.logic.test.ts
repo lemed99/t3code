@@ -9,15 +9,21 @@ import {
   SECTION_GAP,
   UNLISTED_SECTION_TITLE,
   designChangesOfItems,
+  detailFrameKeys,
+  gridTransform,
   findClaudeDesignCanvases,
   fitViewToRect,
   layoutDesignPage,
   liveFrameKeys,
+  liveFrameMinWidth,
   MAX_LIVE_FRAMES,
+  MAX_NEW_LIVE_FRAMES,
   normalizeScreenFile,
   parseClaudeDesignCanvas,
   parseDesignManifest,
   screenFrameSrc,
+  screenThumbnailSrc,
+  stepLiveFrames,
   wheelZoomFactor,
   withUnlistedScreens,
   zoomViewAt,
@@ -370,5 +376,74 @@ describe("liveFrameKeys", () => {
     );
     expect(live.size).toBe(MAX_LIVE_FRAMES);
     expect(live.has("f0")).toBe(false);
+  });
+
+  it("keeps screens with a preview as images until they show near full size", () => {
+    const withPreview = (candidate: (typeof frames)[number]) => liveFrameMinWidth(candidate, true);
+    const viewport = { width: 1000, height: 900 };
+    expect(
+      liveFrameKeys(frames, { x: 0, y: 0, zoom: 0.4 }, viewport, new Set(), null, withPreview).size,
+    ).toBe(0);
+    expect([
+      ...liveFrameKeys(frames, { x: 0, y: 0, zoom: 0.7 }, viewport, new Set(), null, withPreview),
+    ]).toContain("a");
+  });
+});
+
+describe("stepLiveFrames", () => {
+  it("drops frames at once and starts a few new ones per step, in order", () => {
+    const target = new Set(["a", "b", "c", "d", "e", "f"]);
+    const first = stepLiveFrames(new Set(["gone", "a"]), target);
+    expect([...first.next]).toEqual(["a", "b", "c", "d", "e"]);
+    expect(first.next.size - 1).toBe(MAX_NEW_LIVE_FRAMES);
+    expect(first.done).toBe(false);
+    const second = stepLiveFrames(first.next, target);
+    expect(second).toEqual({ next: target, done: true });
+  });
+});
+
+describe("screenThumbnailSrc", () => {
+  it("asks for the screen at its size, per revision, with its fragment", () => {
+    expect(
+      screenThumbnailSrc(
+        "/api/assets/t/Main.dc.html",
+        { file: "Main.dc.html#board=2", width: 390, height: 844 },
+        "r7",
+      ),
+    ).toBe(
+      "/api/assets/t/Main.dc.html?thumbnail=&w=390&h=844&fragment=board%3D2&workspace-revision=r7",
+    );
+    expect(
+      screenThumbnailSrc("/a/b.html?x=1", { file: "b.html", width: 10.4, height: 20 }, null),
+    ).toBe("/a/b.html?x=1&thumbnail=&w=10&h=20");
+  });
+});
+
+describe("detailFrameKeys", () => {
+  const frames = [0, 500, 20_000].map((x, index) => ({
+    key: `f${index}`,
+    file: `f${index}.html`,
+    title: "f",
+    width: 400,
+    height: 800,
+    scroll: false,
+    x,
+    y: 0,
+  }));
+  it("asks for sharp images only past what the overview holds, and only on screen", () => {
+    const viewport = { width: 1000, height: 900 };
+    expect(detailFrameKeys(frames, { x: 0, y: 0, zoom: 0.4 }, viewport, 1).size).toBe(0);
+    // The same zoom on a 2x display shows twice the pixels.
+    expect([...detailFrameKeys(frames, { x: 0, y: 0, zoom: 0.4 }, viewport, 2)].toSorted()).toEqual(
+      ["f0", "f1"],
+    );
+  });
+});
+
+describe("gridTransform", () => {
+  it("keeps the spacing between half and one tile and the shift within one tile", () => {
+    expect(gridTransform({ x: 0, y: 0, zoom: 1 })).toBe("translate(-12px, -12px) scale(0.5)");
+    expect(gridTransform({ x: 30, y: -5, zoom: 0.75 })).toBe("translate(-6px, -5px) scale(0.75)");
+    expect(gridTransform({ x: 6, y: 0, zoom: 0.125 })).toBe("translate(-6px, -12px) scale(0.5)");
   });
 });
