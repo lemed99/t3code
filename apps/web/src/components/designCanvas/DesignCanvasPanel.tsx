@@ -99,6 +99,8 @@ const GRID_TILE = 24;
 const LIVE_STEP_MS = 120;
 /** How long a pan or zoom gesture pauses before the canvas catches up on details. */
 const GESTURE_SETTLE_MS = 150;
+const LIVE_DRAWING_OPACITY = "0.01";
+const LIVE_REVEAL_MS = 250;
 
 const viewportSize = (viewport: HTMLElement | null) => ({
   width: viewport?.clientWidth ?? 800,
@@ -739,11 +741,36 @@ function DesignBoard(
   // every new scale; through a pinch that is most of the work on the machine.
   // Live pages step aside for their previews while a gesture runs, staying
   // loaded, and return when it settles.
+  // Live pages go transparent during a gesture, so a zoom never re-rasters
+  // them (each is a separate process) and their preview shows instead. Coming
+  // back they are drawn barely visible first: a transparent page skips
+  // painting the frames nested in it, and showing it at once would flash it
+  // with those frames empty. The preview under it is the same picture.
+  const liveRevealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setLivePagesPaused = useCallback((paused: boolean) => {
-    for (const frame of worldRef.current?.querySelectorAll("iframe") ?? []) {
-      frame.style.visibility = paused ? "hidden" : "";
+    const setOpacity = (opacity: string) => {
+      for (const frame of worldRef.current?.querySelectorAll("iframe") ?? []) {
+        frame.style.opacity = opacity;
+      }
+    };
+    if (liveRevealTimer.current !== null) clearTimeout(liveRevealTimer.current);
+    liveRevealTimer.current = null;
+    if (paused) {
+      setOpacity("0");
+      return;
     }
+    setOpacity(LIVE_DRAWING_OPACITY);
+    liveRevealTimer.current = setTimeout(() => {
+      liveRevealTimer.current = null;
+      setOpacity("");
+    }, LIVE_REVEAL_MS);
   }, []);
+  useEffect(
+    () => () => {
+      if (liveRevealTimer.current !== null) clearTimeout(liveRevealTimer.current);
+    },
+    [],
+  );
 
   const settleView = useCallback(() => {
     if (settleTimer.current !== null) clearTimeout(settleTimer.current);
@@ -1389,8 +1416,19 @@ const DesignFrameView = memo(function DesignFrameView(props: {
     });
   }
   const [loadedPage, setLoadedPage] = useState<string | null>(null);
+  const [drawnPage, setDrawnPage] = useState<string | null>(null);
   // A page that leaves must load again before it covers its preview next time.
-  if (!props.mounted && loadedPage !== null) setLoadedPage(null);
+  if (!props.mounted && (loadedPage !== null || drawnPage !== null)) {
+    setLoadedPage(null);
+    setDrawnPage(null);
+  }
+  // Loaded is not yet painted, nested frames included: it covers its preview
+  // a moment later.
+  useEffect(() => {
+    if (drawnPage === null) return;
+    const timer = setTimeout(() => setLoadedPage(drawnPage), LIVE_REVEAL_MS);
+    return () => clearTimeout(timer);
+  }, [drawnPage]);
   const pageShown = props.mounted && src !== null && loadedPage === src.page;
 
   const accent = props.live || props.selected;
@@ -1445,13 +1483,14 @@ const DesignFrameView = memo(function DesignFrameView(props: {
             title={frame.title}
             sandbox="allow-scripts allow-forms allow-popups allow-downloads"
             scrolling={frame.scroll ? "auto" : "no"}
-            // Hidden until it has painted, so the preview never gives way to a blank page.
+            // Barely visible until it has painted, so the preview never gives
+            // way to a blank page (fully transparent, it would not paint).
             className={cn(
               "absolute inset-0 block size-full border-0 bg-white",
-              !pageShown && "opacity-0",
+              !pageShown && "opacity-1",
               !props.live && "pointer-events-none",
             )}
-            onLoad={() => setLoadedPage(src.page)}
+            onLoad={() => setDrawnPage(src.page)}
           />
         ) : null}
       </div>
