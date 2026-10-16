@@ -80,6 +80,8 @@ import {
 const TOOLBAR_SPACE = 52;
 /** Below this zoom frame labels would crowd each other and the headings. */
 const LABEL_MIN_ZOOM = 0.12;
+/** How long a pan or zoom gesture pauses before the canvas catches up on details. */
+const GESTURE_SETTLE_MS = 150;
 
 const viewportSize = (viewport: HTMLElement | null) => ({
   width: viewport?.clientWidth ?? 800,
@@ -444,8 +446,13 @@ function DesignBoard(
   const liveFrameRequest = useRef(0);
   const refreshLiveRef = useRef<() => void>(() => {});
   const worldRef = useRef<HTMLDivElement>(null);
+  const labelsRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<CanvasView | null>(saved?.view ?? null);
-  const [zoomPercent, setZoomPercent] = useState(100);
+  // Measured on resize, so gestures never force a layout to read it.
+  const viewportSizeRef = useRef(viewportSize(null));
+  // The zoom labels are sized for: the last settled one, not every frame's.
+  const [labelZoom, setLabelZoom] = useState(1);
+  const zoomReadoutRef = useRef<HTMLSpanElement>(null);
   const [tiny, setTiny] = useState(false);
   const [liveKey, setLiveKey] = useState<string | null>(null);
   useEffect(() => {
@@ -458,7 +465,7 @@ function DesignBoard(
         const next = liveFrameKeys(
           layout.frames,
           view,
-          viewportSize(viewportRef.current),
+          viewportSizeRef.current,
           liveKeysRef.current,
           liveKey,
         );
@@ -482,35 +489,81 @@ function DesignBoard(
   // with an animation, so the first measurement is rarely the final one.
   const autoFitRef = useRef(saved === undefined);
 
-  // Pan and zoom write the transform directly: re-rendering every frame on
-  // each pointer move would be wasted work.
-  const applyView = useCallback(
-    (view: CanvasView) => {
-      viewRef.current = view;
-      const world = worldRef.current;
-      const viewport = viewportRef.current;
-      if (world) {
-        world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
-        world.style.setProperty("--canvas-zoom", String(view.zoom));
-      }
-      if (viewport) {
-        let dot = 24 * view.zoom;
-        while (dot < 12) dot *= 2;
-        viewport.style.backgroundSize = `${dot}px ${dot}px`;
-        viewport.style.backgroundPosition = `${view.x}px ${view.y}px`;
-      }
-      setZoomPercent(Math.round(view.zoom * 100));
+  // A gesture moves only the canvas layer, which the GPU composites without
+  // touching the page. What depends on the zoom (label sizes, the zoom
+  // readout, which screens run live) updates once the gesture pauses:
+  // changing it every frame restyles every screen on the canvas.
+  const paintRequest = useRef(0);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const settledZoom = useRef<number | null>(null);
+  const settleView = useCallback(() => {
+    if (settleTimer.current !== null) clearTimeout(settleTimer.current);
+    settleTimer.current = null;
+    const view = viewRef.current;
+    if (!view) return;
+    if (labelsRef.current) labelsRef.current.style.visibility = "";
+    if (settledZoom.current !== view.zoom) {
+      settledZoom.current = view.zoom;
+      setLabelZoom(view.zoom);
       setTiny(view.zoom < LABEL_MIN_ZOOM);
-      refreshLiveRef.current();
-      savedViews.set(viewKey, { page: pageIndex, view });
+    }
+    refreshLiveRef.current();
+    savedViews.set(viewKey, { page: pageIndex, view });
+  }, [pageIndex, viewKey]);
+
+  const paintView = useCallback(() => {
+    paintRequest.current = 0;
+    const view = viewRef.current;
+    const world = worldRef.current;
+    const viewport = viewportRef.current;
+    if (!view) return;
+    if (world) world.style.transform = `translate(${view.x}px, ${view.y}px) scale(${view.zoom})`;
+    if (zoomReadoutRef.current) {
+      zoomReadoutRef.current.textContent = `${Math.round(view.zoom * 100)}%`;
+    }
+    if (viewport) {
+      let dot = 24 * view.zoom;
+      while (dot < 12) dot *= 2;
+      viewport.style.backgroundSize = `${dot}px ${dot}px`;
+      viewport.style.backgroundPosition = `${view.x}px ${view.y}px`;
+    }
+    // Labels keep their screen size by scaling against the zoom; while it
+    // changes they would lag behind, so they step aside until it settles.
+    const labels = labelsRef.current;
+    if (labels && settledZoom.current !== view.zoom && labels.style.visibility !== "hidden") {
+      labels.style.visibility = "hidden";
+    }
+  }, []);
+
+  /** Shows `view`: at once for a discrete step, or as part of a gesture. */
+  const applyView = useCallback(
+    (view: CanvasView, gesture = false) => {
+      viewRef.current = view;
+      if (!gesture) {
+        cancelAnimationFrame(paintRequest.current);
+        paintView();
+        settleView();
+        return;
+      }
+      // Trackpads send several events per frame; draw once per frame.
+      if (!paintRequest.current) paintRequest.current = requestAnimationFrame(paintView);
+      if (settleTimer.current !== null) clearTimeout(settleTimer.current);
+      settleTimer.current = setTimeout(settleView, GESTURE_SETTLE_MS);
     },
-    [pageIndex, viewKey],
+    [paintView, settleView],
+  );
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(paintRequest.current);
+      if (settleTimer.current !== null) clearTimeout(settleTimer.current);
+    },
+    [],
   );
 
   // Fitting hands the view back to the panel size until the user moves it again.
   const fitAll = useCallback(() => {
     autoFitRef.current = true;
-    const size = viewportSize(viewportRef.current);
+    const size = viewportSizeRef.current;
     applyView(
       fitViewToRect(
         { x: 0, y: 0, width: layout.width, height: layout.height },
@@ -523,7 +576,7 @@ function DesignBoard(
   const zoomToFrame = useCallback(
     (frame: PlacedFrame) => {
       autoFitRef.current = false;
-      const size = viewportSize(viewportRef.current);
+      const size = viewportSizeRef.current;
       applyView(
         fitViewToRect(
           { x: frame.x, y: frame.y - 40, width: frame.width, height: frame.height + 40 },
@@ -540,7 +593,7 @@ function DesignBoard(
       const view = viewRef.current;
       if (!view) return;
       autoFitRef.current = false;
-      const size = viewportSize(viewportRef.current);
+      const size = viewportSizeRef.current;
       applyView(zoomViewAt(view, factor, cx ?? size.width / 2, cy ?? size.height / 2));
     },
     [applyView],
@@ -552,6 +605,7 @@ function DesignBoard(
     if (initializedPageRef.current === pageIndex) return;
     const restore = initializedPageRef.current === null ? viewRef.current : null;
     initializedPageRef.current = pageIndex;
+    viewportSizeRef.current = viewportSize(viewportRef.current);
     setLiveKey(null);
     setSelectedKey(null);
     if (restore) applyView(restore);
@@ -565,7 +619,9 @@ function DesignBoard(
     const viewport = viewportRef.current;
     if (!viewport) return;
     return observeResize(viewport, () => {
+      viewportSizeRef.current = viewportSize(viewport);
       if (autoFitRef.current) fitAll();
+      else refreshLiveRef.current();
     });
   }, [fitAll]);
 
@@ -573,15 +629,21 @@ function DesignBoard(
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport) return;
+    // Read once per gesture: measuring on every event would force a layout.
+    let rect: DOMRect | null = null;
+    let rectAt = 0;
     const onWheel = (event: WheelEvent) => {
       const view = viewRef.current;
       if (!view) return;
       event.preventDefault();
+      if (rect === null || event.timeStamp - rectAt > GESTURE_SETTLE_MS) {
+        rect = viewport.getBoundingClientRect();
+      }
+      rectAt = event.timeStamp;
       autoFitRef.current = false;
       const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
       const dx = event.deltaX * unit;
       const dy = event.deltaY * unit;
-      const rect = viewport.getBoundingClientRect();
       if (event.ctrlKey || event.metaKey) {
         applyView(
           zoomViewAt(
@@ -590,11 +652,12 @@ function DesignBoard(
             event.clientX - rect.left,
             event.clientY - rect.top,
           ),
+          true,
         );
       } else if (event.shiftKey && dx === 0) {
-        applyView({ ...view, x: view.x - dy });
+        applyView({ ...view, x: view.x - dy }, true);
       } else {
-        applyView({ ...view, x: view.x - dx, y: view.y - dy });
+        applyView({ ...view, x: view.x - dx, y: view.y - dy }, true);
       }
     };
     viewport.addEventListener("wheel", onWheel, { passive: false });
@@ -604,6 +667,7 @@ function DesignBoard(
   const pointers = useRef(new Map<number, { x: number; y: number }>());
   const drag = useRef<{ x: number; y: number; view: CanvasView } | null>(null);
   const pinch = useRef<{ distance: number; zoom: number } | null>(null);
+  const pointerRect = useRef<DOMRect | null>(null);
 
   const frameKeyAt = (target: EventTarget | null): string | null =>
     target instanceof Element
@@ -619,6 +683,7 @@ function DesignBoard(
     setSelectedKey(key);
     event.currentTarget.setPointerCapture(event.pointerId);
     pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    pointerRect.current = event.currentTarget.getBoundingClientRect();
     const view = viewRef.current;
     if (!view) return;
     if (pointers.current.size === 2) {
@@ -637,7 +702,7 @@ function DesignBoard(
     if (!view) return;
     if (pinch.current && pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()];
-      const rect = event.currentTarget.getBoundingClientRect();
+      const rect = pointerRect.current ?? event.currentTarget.getBoundingClientRect();
       autoFitRef.current = false;
       const target =
         (pinch.current.zoom * Math.hypot(a!.x - b!.x, a!.y - b!.y)) / pinch.current.distance;
@@ -648,16 +713,20 @@ function DesignBoard(
           (a!.x + b!.x) / 2 - rect.left,
           (a!.y + b!.y) / 2 - rect.top,
         ),
+        true,
       );
       return;
     }
     if (drag.current) {
       autoFitRef.current = false;
-      applyView({
-        ...view,
-        x: drag.current.view.x + event.clientX - drag.current.x,
-        y: drag.current.view.y + event.clientY - drag.current.y,
-      });
+      applyView(
+        {
+          ...view,
+          x: drag.current.view.x + event.clientX - drag.current.x,
+          y: drag.current.view.y + event.clientY - drag.current.y,
+        },
+        true,
+      );
     }
   };
 
@@ -706,9 +775,10 @@ function DesignBoard(
         <div
           ref={viewportRef}
           tabIndex={0}
+          // Its single-key shortcuts (1, 0, +, -) must not type into the composer.
+          role="application"
           aria-label="Design canvas"
-          data-tiny={tiny ? "" : undefined}
-          className="group/canvas relative min-h-0 flex-1 cursor-grab touch-none overflow-hidden bg-muted/40 outline-none select-none active:cursor-grabbing"
+          className="relative min-h-0 flex-1 cursor-grab touch-none overflow-hidden bg-muted/40 outline-none select-none active:cursor-grabbing"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerEnd}
@@ -744,10 +814,23 @@ function DesignBoard(
                 live={frame.key === liveKey}
                 mounted={liveKeys.has(frame.key)}
                 selected={frame.key === selectedKey}
-                onOpenFile={props.onOpenFile}
-                onZoomTo={zoomToFrame}
               />
             ))}
+            <div ref={labelsRef} className="absolute top-0 left-0">
+              {tiny
+                ? null
+                : layout.frames.map((frame) => (
+                    <FrameLabel
+                      key={frame.key}
+                      frame={frame}
+                      relativePath={`${props.root}/${frame.file.split("#", 1)[0]}`}
+                      accent={frame.key === liveKey || frame.key === selectedKey}
+                      labelZoom={labelZoom}
+                      onOpenFile={props.onOpenFile}
+                      onZoomTo={zoomToFrame}
+                    />
+                  ))}
+            </div>
           </div>
         </div>
 
@@ -789,7 +872,8 @@ function DesignBoard(
               aria-label="Zoom to 100% (0)"
               onClick={() => zoomBy(1 / (viewRef.current?.zoom ?? 1))}
             >
-              <span className="tabular-nums">{zoomPercent}%</span>
+              {/* Written by paintView, so it follows a gesture frame by frame. */}
+              <span ref={zoomReadoutRef} className="tabular-nums" />
             </Button>
             <ToolbarButton label="Zoom in (+)" onClick={() => zoomBy(1.25)}>
               <Plus />
@@ -832,6 +916,65 @@ function siblingAssetUrl(url: string, file: string): string {
   return `${path.slice(0, path.lastIndexOf("/") + 1)}${encodeURIComponent(name)}${query === -1 ? "" : url.slice(query)}`;
 }
 
+/**
+ * A screen's name above it, kept at the same size on screen whatever the zoom.
+ * Labels live in their own layer so resizing them after a zoom, or hiding
+ * them during one, touches nothing else on the canvas.
+ */
+const FrameLabel = memo(function FrameLabel(props: {
+  readonly frame: PlacedFrame;
+  readonly relativePath: string;
+  readonly accent: boolean;
+  readonly labelZoom: number;
+  readonly onOpenFile: (relativePath: string) => void;
+  readonly onZoomTo: (frame: PlacedFrame) => void;
+}) {
+  const { frame, relativePath } = props;
+  return (
+    <div
+      data-frame-key={frame.key}
+      className="absolute"
+      style={{ left: frame.x, top: frame.y, width: frame.width }}
+    >
+      <div
+        className={cn(
+          "@container absolute bottom-full left-0 flex h-[26px] origin-bottom-left items-center gap-1 text-xs whitespace-nowrap text-muted-foreground",
+          props.accent && "text-primary",
+        )}
+        style={{
+          width: frame.width * props.labelZoom,
+          transform: `scale(${1 / props.labelZoom})`,
+        }}
+        onDoubleClick={(event) => {
+          event.stopPropagation();
+          props.onZoomTo(frame);
+        }}
+      >
+        <span className="min-w-0 flex-1 truncate">{frame.title}</span>
+        <span className="tabular-nums opacity-70 @max-[240px]:hidden">
+          {frame.width} × {frame.height}
+        </span>
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="icon-xs"
+                variant="ghost-muted"
+                className="@max-[110px]:hidden"
+                aria-label={`Open ${relativePath}`}
+                onClick={() => props.onOpenFile(relativePath)}
+              />
+            }
+          >
+            <FileCode2 />
+          </TooltipTrigger>
+          <TooltipPopup>Open the screen's file</TooltipPopup>
+        </Tooltip>
+      </div>
+    </div>
+  );
+});
+
 const DesignFrameView = memo(function DesignFrameView(props: {
   readonly frame: PlacedFrame;
   readonly root: string;
@@ -846,8 +989,6 @@ const DesignFrameView = memo(function DesignFrameView(props: {
   /** Runs as a live page; otherwise a light placeholder stands in. */
   readonly mounted: boolean;
   readonly selected: boolean;
-  readonly onOpenFile: (relativePath: string) => void;
-  readonly onZoomTo: (frame: PlacedFrame) => void;
 }) {
   const { frame } = props;
   const relativePath = `${props.root}/${frame.file.split("#", 1)[0]}`;
@@ -895,41 +1036,6 @@ const DesignFrameView = memo(function DesignFrameView(props: {
       className="absolute"
       style={{ left: frame.x, top: frame.y, width: frame.width, height: frame.height }}
     >
-      <div
-        className={cn(
-          "@container absolute bottom-full left-0 flex h-[26px] origin-bottom-left items-center gap-1 text-xs whitespace-nowrap text-muted-foreground group-data-[tiny]/canvas:hidden",
-          accent && "text-primary",
-        )}
-        style={{
-          width: `calc(${frame.width}px * var(--canvas-zoom, 1))`,
-          transform: "scale(calc(1 / var(--canvas-zoom, 1)))",
-        }}
-        onDoubleClick={(event) => {
-          event.stopPropagation();
-          props.onZoomTo(frame);
-        }}
-      >
-        <span className="min-w-0 flex-1 truncate">{frame.title}</span>
-        <span className="tabular-nums opacity-70 @max-[240px]:hidden">
-          {frame.width} × {frame.height}
-        </span>
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <Button
-                size="icon-xs"
-                variant="ghost-muted"
-                className="@max-[110px]:hidden"
-                aria-label={`Open ${relativePath}`}
-                onClick={() => props.onOpenFile(relativePath)}
-              />
-            }
-          >
-            <FileCode2 />
-          </TooltipTrigger>
-          <TooltipPopup>Open the screen's file</TooltipPopup>
-        </Tooltip>
-      </div>
       <div
         className={cn(
           "absolute inset-0 overflow-hidden rounded-xs bg-white shadow-lg",
