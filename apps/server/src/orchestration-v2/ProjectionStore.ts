@@ -3787,10 +3787,13 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
               WHERE notice.run_id = r.run_id AND notice.type = 'system_notice'
                 AND json_extract(notice.payload_json, '$.nativeItemRef.nativeId')
                   LIKE ${`${USAGE_LIMIT_NOTICE_NATIVE_ID_PREFIX}%`}
-                -- A run that produced anything after the notice has resumed.
+                -- Model output after the notice means the run resumed. Other
+                -- items do not: subagents keep finishing local work (a command,
+                -- their own blocked request's error) after the account is blocked.
                 AND NOT EXISTS (
                   SELECT 1 FROM orchestration_v2_projection_turn_items later
-                  WHERE later.run_id = r.run_id AND later.type <> 'system_notice'
+                  WHERE later.run_id = r.run_id
+                    AND later.type IN ('assistant_message', 'reasoning')
                     AND later.updated_at > notice.updated_at
                 )
             )

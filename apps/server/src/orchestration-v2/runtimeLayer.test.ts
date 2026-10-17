@@ -5164,8 +5164,41 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
           modelSelection,
         },
       ]);
-      // Output after the notice means the window reopened and the run resumed.
       const later = DateTime.add(now, { seconds: 1 });
+      // Subagents keep finishing local work after the account is blocked: a
+      // command they started, or the error their own blocked request left.
+      // Neither needs the account, so the run is still paused.
+      yield* events.write({
+        events: [
+          {
+            id: EventId.make("account-switch-held:subagent-command"),
+            type: "turn-item.updated",
+            threadId,
+            occurredAt: later,
+            payload: {
+              id: TurnItemId.make("account-switch-held:subagent-command"),
+              type: "command_execution",
+              threadId,
+              runId: run.id,
+              nodeId: run.rootNodeId,
+              providerThreadId: null,
+              providerTurnId: null,
+              nativeItemRef: null,
+              parentItemId: null,
+              ordinal: 3,
+              status: "completed",
+              title: "Run tests",
+              input: "vp test run",
+              exitCode: 0,
+              startedAt: now,
+              completedAt: later,
+              updatedAt: later,
+            },
+          },
+        ],
+      });
+      assert.lengthOf(yield* held(), 1);
+      // Model output after the notice means the window reopened and the run resumed.
       yield* events.write({
         events: [
           {
@@ -5183,7 +5216,7 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
               providerTurnId: null,
               nativeItemRef: null,
               parentItemId: null,
-              ordinal: 3,
+              ordinal: 4,
               status: "completed",
               title: "Assistant",
               messageId: MessageId.make("account-switch-held:resumed"),
