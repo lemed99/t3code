@@ -133,3 +133,51 @@ export function usePreviewImage(
   if (url === null) return null;
   return result !== null && result.url === url ? result.image : undefined;
 }
+
+// One queue for the whole app: a couple of requests at a time, after a pause,
+// so the screens someone is looking at are always fetched first.
+const PREWARM_CONCURRENCY = 1;
+export const PREWARM_DELAY_MS = 3_000;
+const prewarmed = new Set<string>();
+const prewarmQueue: Array<string> = [];
+let prewarmRunning = 0;
+let prewarmTimer: ReturnType<typeof setTimeout> | null = null;
+let prewarmHeld = false;
+
+export function queuePreviewPrewarm(key: string, url: string) {
+  if (prewarmed.has(key)) return;
+  prewarmed.add(key);
+  prewarmQueue.push(url);
+  if (!prewarmHeld) prewarmTimer ??= setTimeout(drainPrewarmQueue, PREWARM_DELAY_MS);
+}
+
+/**
+ * Holds off new captures until the canvas has been still for a while: a
+ * capture takes a whole CPU core for a second or two, which a zoom or pan
+ * on a smaller machine feels.
+ */
+export function holdPreviewPrewarm(moving: boolean) {
+  prewarmHeld = moving;
+  if (prewarmTimer !== null) clearTimeout(prewarmTimer);
+  prewarmTimer = moving ? null : setTimeout(drainPrewarmQueue, PREWARM_DELAY_MS);
+}
+
+function drainPrewarmQueue() {
+  prewarmTimer = null;
+  startPrewarms();
+}
+
+function startPrewarms() {
+  if (prewarmHeld || prewarmTimer !== null) return;
+  while (prewarmRunning < PREWARM_CONCURRENCY && prewarmQueue.length > 0) {
+    const url = prewarmQueue.shift()!;
+    prewarmRunning += 1;
+    void fetch(url, { priority: "low" })
+      .then((response) => response.arrayBuffer())
+      .catch(() => undefined)
+      .finally(() => {
+        prewarmRunning -= 1;
+        startPrewarms();
+      });
+  }
+}

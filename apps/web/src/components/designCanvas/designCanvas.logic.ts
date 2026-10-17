@@ -276,14 +276,6 @@ export function fitViewToRect(
   };
 }
 
-/**
- * Wheel input: trackpad pinches arrive as ctrl+wheel with small deltas, mouse
- * wheels with large ones, so a single step is capped near 1.35x.
- */
-export function wheelZoomFactor(deltaY: number): number {
-  return Math.exp(-Math.max(-50, Math.min(50, deltaY)) * 0.006);
-}
-
 /** The asset URL for a screen, with the workspace revision so edits reload it. */
 export function screenFrameSrc(
   assetUrl: string,
@@ -670,4 +662,17 @@ export function liveFrameKeys(
     .map((entry) => entry.key);
   // The screen in use comes first, so it is never the one left waiting.
   return new Set(pinned ? [pinned, ...candidates] : candidates);
+}
+
+export const frameDirectory = (file: string) => {
+  const path = file.split("#", 1)[0]!;
+  return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+};
+
+/** The asset URL for `file`, from one issued for a file in the same folder. */
+export function siblingAssetUrl(url: string, file: string): string {
+  const name = file.split("#", 1)[0]!.split("/").pop() ?? "";
+  const query = url.indexOf("?");
+  const path = query === -1 ? url : url.slice(0, query);
+  return `${path.slice(0, path.lastIndexOf("/") + 1)}${encodeURIComponent(name)}${query === -1 ? "" : url.slice(query)}`;
 }

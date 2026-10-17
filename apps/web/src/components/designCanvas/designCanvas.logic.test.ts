@@ -24,7 +24,6 @@ import {
   screenFrameSrc,
   screenThumbnailSrc,
   stepLiveFrames,
-  wheelZoomFactor,
   withUnlistedScreens,
   zoomViewAt,
 } from "./designCanvas.logic";
@@ -224,11 +223,6 @@ describe("canvas view math", () => {
         20,
       ).zoom,
     ).toBe(0.5);
-  });
-
-  it("caps a wheel zoom step", () => {
-    expect(wheelZoomFactor(-1000)).toBeCloseTo(Math.exp(0.3));
-    expect(wheelZoomFactor(4)).toBeCloseTo(Math.exp(-0.024));
   });
 });
 
