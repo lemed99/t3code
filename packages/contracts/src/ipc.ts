@@ -323,6 +323,42 @@ export const DesktopCliCommandStateSchema = Schema.Struct({
 });
 export type DesktopCliCommandState = typeof DesktopCliCommandStateSchema.Type;
 
+/**
+ * Updates of a patched build that installs from a fork's branch: what is
+ * installed, the branch's latest commit, and the installer's progress.
+ */
+export const DesktopPatchUpdateStateSchema = Schema.Struct({
+  supported: Schema.Boolean,
+  source: Schema.NullOr(Schema.String),
+  installedVersion: Schema.NullOr(Schema.String),
+  latest: Schema.NullOr(
+    Schema.Struct({
+      version: Schema.String,
+      date: Schema.NullOr(Schema.String),
+      summary: Schema.String,
+    }),
+  ),
+  checkError: Schema.NullOr(Schema.String),
+  run: Schema.NullOr(
+    Schema.Struct({
+      phase: Schema.Literals([
+        "checking",
+        "downloading",
+        "building",
+        "ready",
+        "installing",
+        "installed",
+        "up-to-date",
+        "failed",
+      ]),
+      message: Schema.String,
+      active: Schema.Boolean,
+      at: Schema.Number,
+    }),
+  ),
+});
+export type DesktopPatchUpdateState = typeof DesktopPatchUpdateStateSchema.Type;
+
 export interface DesktopUpdateActionResult {
   accepted: boolean;
   completed: boolean;
@@ -1126,6 +1162,13 @@ export interface DesktopBridge {
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
   onUpdateState: (listener: (state: DesktopUpdateState) => void) => () => void;
+  patchUpdate?: {
+    getState: () => Promise<DesktopPatchUpdateState>;
+    check: () => Promise<DesktopPatchUpdateState>;
+    start: () => Promise<DesktopPatchUpdateState>;
+    /** Quits so a ready build installs; the installer reopens the app. */
+    restartToInstall: () => Promise<void>;
+  };
   cliCommand?: {
     getState: () => Promise<DesktopCliCommandState>;
     install: () => Promise<DesktopCliCommandState>;

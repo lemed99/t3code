@@ -531,6 +531,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     releaseChannelOnly: true,
   },
   {
+    id: "patch-updates",
+    title: "Patch updates",
+    to: "/settings/general",
+    searchTerms: ["patch fork update account switching rebuild install"],
+    desktopOnly: true,
+  },
+  {
     id: "cli-command",
     title: "t3 command",
     to: "/settings/general",
