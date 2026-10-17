@@ -33,6 +33,7 @@ import {
   replaceComposerContextReferences,
 } from "@t3tools/shared/composerContextReferences";
 import { imageMimeType } from "@t3tools/shared/image";
+import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { videoMimeType } from "@t3tools/shared/video";
 import { DraftComposerAttachmentSchema } from "../lib/composer-image-schema";
 import {
@@ -1236,6 +1237,28 @@ function updateComposerDrafts(
   }
   appAtomRegistry.set(composerDraftsAtom, next);
   schedulePersistComposerState();
+}
+
+/**
+ * Forgets a thread's chosen model once the thread already runs with exactly
+ * it, so the composer follows the thread from then on: when the server moves
+ * a limited thread to another account, the next message goes there too.
+ */
+export function releaseComposerDraftModelSelection(
+  draftKey: string,
+  threadModelSelection: ModelSelection,
+): void {
+  updateComposerDrafts((current) => {
+    const draft = current[draftKey];
+    if (
+      !draft?.modelSelection ||
+      !modelSelectionsEqual(draft.modelSelection, threadModelSelection)
+    ) {
+      return current;
+    }
+    const { modelSelection: _released, ...rest } = draft;
+    return withComposerDraft(current, draftKey, rest);
+  });
 }
 
 export function setStickyComposerModelSelection(modelSelection: ModelSelection): void {

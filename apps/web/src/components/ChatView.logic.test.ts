@@ -1376,6 +1376,29 @@ describe("resolveComposerProviderSelection", () => {
     });
   }
 
+  it("sends the next message to the account a limited thread was moved to", () => {
+    const personal = entry("claudeAgent", "claudeAgent");
+    const work = entry("claudeAgent", "claude_work");
+    const entries = [personal, work];
+    // As the composer orders them: its own chosen account, the account the
+    // thread runs on, then the thread's selection.
+    const pick = (chosen: ProviderInstanceId | null, running: ProviderInstanceId) =>
+      resolveComposerProviderSelection({
+        entries,
+        candidateInstanceIds: [chosen, running, running],
+        lockedProvider: ProviderDriverKind.make("claudeAgent"),
+        lockedInstanceId: running,
+      }).selectedProviderEntry?.instanceId;
+
+    // A new thread starts with the last account used, and runs on it.
+    expect(pick(personal.instanceId, personal.instanceId)).toBe(personal.instanceId);
+    // Kept after that, the choice sent every later message back to the
+    // account that hit its limit, though the server had moved the thread.
+    expect(pick(personal.instanceId, work.instanceId)).toBe(personal.instanceId);
+    // Released once the thread ran on it, the composer follows the thread.
+    expect(pick(null, work.instanceId)).toBe(work.instanceId);
+  });
+
   it.each([
     ["claudeAgent", "claude_work"],
     ["codex", "codex_work"],

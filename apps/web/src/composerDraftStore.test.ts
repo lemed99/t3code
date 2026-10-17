@@ -2442,6 +2442,42 @@ describe("composerDraftStore setModelSelection", () => {
   });
 });
 
+describe("composerDraftStore releaseProviderChoice", () => {
+  const threadId = ThreadId.make("thread-release-provider");
+  const threadRef = scopeThreadRef(TEST_ENVIRONMENT_ID, threadId);
+
+  beforeEach(() => {
+    resetComposerDraftStore();
+  });
+
+  it("forgets the chosen account once the thread runs on it, keeping its model and options", () => {
+    const store = useComposerDraftStore.getState();
+    store.setStickyModelSelection(
+      modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "high" }),
+    );
+    store.applyStickyState(threadRef);
+
+    store.releaseProviderChoice(threadRef, ProviderInstanceId.make("claudeAgent"));
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)).toMatchObject({
+      activeProvider: null,
+      modelSelectionByProvider: {
+        claudeAgent: modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6", { effort: "high" }),
+      },
+    });
+  });
+
+  it("keeps a choice the thread has not switched to yet", () => {
+    const store = useComposerDraftStore.getState();
+    store.setStickyModelSelection(modelSelection(CLAUDE_AGENT_DRIVER, "claude-opus-4-6"));
+    store.applyStickyState(threadRef);
+
+    store.releaseProviderChoice(threadRef, ProviderInstanceId.make("claude-work"));
+
+    expect(draftFor(threadId, TEST_ENVIRONMENT_ID)?.activeProvider).toBe("claudeAgent");
+  });
+});
+
 describe("composerDraftStore sticky composer settings", () => {
   beforeEach(() => {
     resetComposerDraftStore();

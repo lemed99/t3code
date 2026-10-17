@@ -2144,6 +2144,26 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           })
       : null);
   const setComposerDraftPrompt = useComposerDraftStore((store) => store.setPrompt);
+  const releaseComposerProviderChoice = useComposerDraftStore(
+    (store) => store.releaseProviderChoice,
+  );
+  // A chosen account is only a request until the thread runs on it. Once the
+  // thread does, the composer follows the thread instead: when the server
+  // moves a limited thread to another account, the next message goes there,
+  // not back to the account that hit its limit. A new thread keeps its pick.
+  const followedThreadInstanceId =
+    activeThread?.runtime?.providerInstanceId ?? activeThreadModelSelection?.instanceId ?? null;
+  const chosenInstanceId = composerDraft.activeProvider ?? null;
+  useEffect(() => {
+    if (typeof composerDraftTarget === "string") return;
+    if (chosenInstanceId === null || chosenInstanceId !== followedThreadInstanceId) return;
+    releaseComposerProviderChoice(composerDraftTarget, chosenInstanceId);
+  }, [
+    chosenInstanceId,
+    composerDraftTarget,
+    followedThreadInstanceId,
+    releaseComposerProviderChoice,
+  ]);
   const addComposerDraftImages = useComposerDraftStore((store) => store.addImages);
   const removeComposerDraftImage = useComposerDraftStore((store) => store.removeImage);
   const addComposerDraftFiles = useComposerDraftStore((store) => store.addFiles);

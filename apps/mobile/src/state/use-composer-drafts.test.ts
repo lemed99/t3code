@@ -189,6 +189,7 @@ import {
   rememberComposerDraftSelection,
   setComposerDraftAttachmentUpload,
   waitForComposerDraftsLoaded,
+  releaseComposerDraftModelSelection,
   setStickyComposerModelSelection,
   stickyComposerModelSelectionAtom,
   undoComposerDraftMerge,
@@ -222,6 +223,24 @@ afterEach(() => {
   composerAttachmentCleanupMocks.releaseUploads.mockResolvedValue(undefined);
   incomingShareStorageMocks.load.mockReset();
   incomingShareStorageMocks.load.mockResolvedValue([]);
+});
+
+describe("releaseComposerDraftModelSelection", () => {
+  const personal = { instanceId: ProviderInstanceId.make("claudeAgent"), model: "claude-opus-4-6" };
+  const work = { instanceId: ProviderInstanceId.make("claude-work"), model: "claude-opus-4-6" };
+
+  it("forgets a chosen model once the thread runs with exactly it", () => {
+    appAtomRegistry.set(composerDraftsAtom, { thread: { ...DRAFT, modelSelection: personal } });
+    releaseComposerDraftModelSelection("thread", personal);
+    expect(getComposerDraftSnapshot("thread").modelSelection).toBeUndefined();
+    expect(getComposerDraftSnapshot("thread").text).toBe("hello");
+  });
+
+  it("keeps a choice the thread has not taken yet", () => {
+    appAtomRegistry.set(composerDraftsAtom, { thread: { ...DRAFT, modelSelection: work } });
+    releaseComposerDraftModelSelection("thread", personal);
+    expect(getComposerDraftSnapshot("thread").modelSelection).toEqual(work);
+  });
 });
 
 function contextDraft(start: number, count: number): ComposerDraft {

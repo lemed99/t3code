@@ -488,6 +488,11 @@ interface ComposerDraftStoreState {
   finalizePromotedDraftThread: (threadRef: ComposerThreadTarget) => void;
   clearDraftThread: (threadRef: ComposerThreadTarget) => void;
   setStickyModelSelection: (modelSelection: ModelSelection | null | undefined) => void;
+  /**
+   * Forgets the thread's chosen account once it is `instanceId`, the one the
+   * thread already uses, so the composer follows the thread from then on.
+   */
+  releaseProviderChoice: (threadRef: ComposerThreadTarget, instanceId: ProviderInstanceId) => void;
   setPrompt: (threadRef: ComposerThreadTarget, prompt: string) => void;
   setTerminalContexts: (threadRef: ComposerThreadTarget, contexts: TerminalContextDraft[]) => void;
   setModelSelection: (
@@ -2822,6 +2827,26 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               stickyModelSelectionByProvider: nextMap,
               stickyActiveProvider: normalized.instanceId,
             };
+          });
+        },
+        releaseProviderChoice: (threadRef, instanceId) => {
+          const threadKey = resolveComposerDraftKey(get(), threadRef) ?? "";
+          if (threadKey.length === 0) {
+            return;
+          }
+          set((state) => {
+            const existing = state.draftsByThreadKey[threadKey];
+            if (!existing || existing.activeProvider !== instanceId) {
+              return state;
+            }
+            const nextDraft: ComposerThreadDraftState = { ...existing, activeProvider: null };
+            const nextDraftsByThreadKey = { ...state.draftsByThreadKey };
+            if (shouldRemoveDraft(nextDraft)) {
+              delete nextDraftsByThreadKey[threadKey];
+            } else {
+              nextDraftsByThreadKey[threadKey] = nextDraft;
+            }
+            return { draftsByThreadKey: nextDraftsByThreadKey };
           });
         },
         applyStickyState: (threadRef) => {
