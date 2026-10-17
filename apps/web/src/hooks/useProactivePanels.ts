@@ -42,6 +42,9 @@ export function useProactivePanels(input: {
   readonly pullRequestsSurfaceAvailable: boolean;
   readonly visiblePullRequestCount: number;
   readonly onDiffPanelOpen: (() => void) | undefined;
+  // Runs that changed artifacts; their completion opens Artifacts, not the diff.
+  readonly artifactRunIds: ReadonlySet<string>;
+  readonly hasWorkspaceRoot: boolean;
 }) {
   const {
     threadRef,
@@ -61,6 +64,8 @@ export function useProactivePanels(input: {
     pullRequestsSurfaceAvailable,
     visiblePullRequestCount,
     onDiffPanelOpen,
+    artifactRunIds,
+    hasWorkspaceRoot,
   } = input;
   const proactivePanelObservationRef = useRef<ReturnType<
     typeof observeProactivePanelUserChoice
@@ -178,6 +183,15 @@ export function useProactivePanels(input: {
       runningTurnId:
         diffAction === "defer" || shouldDeferLink ? previousRunningTurnId : activeRunningTurnId,
     };
+    if (
+      eligibleCompletion &&
+      newlyCompletedTurnId !== null &&
+      hasWorkspaceRoot &&
+      artifactRunIds.has(newlyCompletedTurnId)
+    ) {
+      panels.openProactive(threadRef, { id: "canvas", kind: "canvas" }, userActionRevision);
+      return;
+    }
     if (diffAction !== "open" || newlyCompletedTurnId === null) return;
     if (!panels.openProactive(threadRef, { id: "diff", kind: "diff" }, userActionRevision)) {
       return;
@@ -188,8 +202,10 @@ export function useProactivePanels(input: {
     activeLatestRun?.runId,
     activeLatestRun?.status,
     activeRunningTurnId,
+    artifactRunIds,
     clientSettingsHydrated,
     hasLinkedPullRequestDetail,
+    hasWorkspaceRoot,
     isGitRepo,
     latestRunSettled,
     linkedThreadPullRequest,

@@ -20,6 +20,8 @@ const TYPE_TO_FOCUS_INTERACTIVE_SELECTOR = [
   '[role="radio"]',
   '[role="switch"]',
   '[role="tab"]',
+  // Widgets with keyboard shortcuts of their own, such as the design canvas.
+  '[role="application"]',
 ].join(",");
 // Popups match only while open or closing: some stay mounted when closed,
 // such as the chat header actions menu.

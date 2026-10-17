@@ -31,6 +31,7 @@ const DevicePanel = lazy(() =>
   import("../device/DevicePanel").then((module) => ({ default: module.DevicePanel })),
 );
 const FilePreviewPanel = lazy(() => import("../files/FilePreviewPanel"));
+const DesignCanvasPanel = lazy(() => import("../designCanvas/DesignCanvasPanel"));
 
 export type RightPanelTerminalProps = Omit<
   PersistentThreadTerminalPanelProps,
@@ -68,6 +69,8 @@ export function RightPanelSurfaceContent(props: {
   readonly keybindings: ResolvedKeybindingsConfig;
   readonly configuredPreviewUrls: ReadonlyArray<string>;
   readonly workspaceMutationId: string | null;
+  /** Changes when a turn touched artifacts, so the Artifacts panel reloads them. */
+  readonly designRevision: string | null;
   readonly getShortcutContext: () => ShortcutMatchContext;
   readonly onSendAnnotation: (
     annotation: PreviewAnnotationPayload,
@@ -178,6 +181,23 @@ export function RightPanelSurfaceContent(props: {
           />
         </Suspense>
       );
+    case "canvas": {
+      const workspaceRoot = props.files.workspaceRoot;
+      if (props.files.projectName === null || !workspaceRoot) return null;
+      return (
+        <Suspense fallback={null}>
+          <DesignCanvasPanel
+            key={`${props.environmentId}:${workspaceRoot}`}
+            environmentId={props.environmentId}
+            cwd={workspaceRoot}
+            threadRef={threadRef}
+            draft={typeof props.composerDraftTarget === "string"}
+            designRevision={props.designRevision}
+            onOpenFile={props.files.onOpenFile}
+          />
+        </Suspense>
+      );
+    }
     case "files":
     case "file": {
       const files = props.files;

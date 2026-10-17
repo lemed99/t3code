@@ -249,6 +249,7 @@ import {
 } from "../previewMiniPlayerStore";
 import { threadPullRequestPanelTarget } from "./pullRequest/pullRequestDetail.logic";
 import { RightPanelTabs } from "./RightPanelTabs";
+import { designChangesOfItems } from "./designCanvas/designCanvas.logic";
 import { LinkPullRequestDialogHost } from "./pullRequest/LinkPullRequestDialog";
 import { useDeviceState } from "~/state/device";
 import { BranchToolbar, type BranchToolbarHandle } from "./BranchToolbar";
@@ -3710,6 +3711,12 @@ export default function ChatView(props: ChatViewProps) {
     useRightPanelStore.getState().open(activeThreadRef, "files");
   };
   const addFilesSurfaceStable = useStableCallback(addFilesSurface);
+  const addCanvasSurface = () => {
+    if (!activeThreadRef || !activeProject) return;
+    useRightPanelStore.getState().open(activeThreadRef, "canvas");
+  };
+  const addCanvasSurfaceStable = useStableCallback(addCanvasSurface);
+  const designChanges = designChangesOfItems(serverVisibleTurnItems.map((entry) => entry.item));
   const supportsThreadPullRequests =
     serverConfig?.environment.capabilities.threadPullRequests === true;
   const visiblePullRequests = visibleThreadPullRequests(
@@ -3794,6 +3801,8 @@ export default function ChatView(props: ChatViewProps) {
     pullRequestsSurfaceAvailable,
     visiblePullRequestCount,
     onDiffPanelOpen,
+    artifactRunIds: designChanges.runIds,
+    hasWorkspaceRoot: Boolean(activeWorkspaceRoot),
   });
   const closePreviewPanel = () => {
     if (activeThreadRef) {
@@ -7777,6 +7786,7 @@ export default function ChatView(props: ChatViewProps) {
       keybindings={keybindings}
       configuredPreviewUrls={configuredPreviewUrls}
       workspaceMutationId={workspaceMutationId}
+      designRevision={designChanges.revision}
       getShortcutContext={getShortcutContextStable}
       onSendAnnotation={sendPreviewAnnotationStable}
       onCloseSurface={closeRightPanelSurface}
@@ -8599,6 +8609,7 @@ export default function ChatView(props: ChatViewProps) {
           onAddTerminal={addTerminalSurfaceStable}
           onAddDiff={addDiffSurfaceStable}
           onAddFiles={addFilesSurfaceStable}
+          onAddCanvas={addCanvasSurfaceStable}
           onAddPullRequest={addPullRequestSurfaceStable}
           onAddPullRequests={addPullRequestsSurfaceStable}
           onAddDevice={addDeviceSurfaceStable}
@@ -8606,6 +8617,7 @@ export default function ChatView(props: ChatViewProps) {
           terminalAvailable={activeProject !== null && canOperateTerminal}
           diffAvailable={isServerThread && isGitRepo}
           filesAvailable={activeProject !== null}
+          canvasAvailable={activeProject !== null && Boolean(activeWorkspaceRoot)}
           pullRequestAvailable={pullRequestSurfaceAvailable}
           pullRequestsAvailable={pullRequestsSurfaceAvailable}
           deviceAvailable={activeThreadRef !== null}
@@ -8654,6 +8666,7 @@ export default function ChatView(props: ChatViewProps) {
             onAddTerminal={addTerminalSurfaceStable}
             onAddDiff={addDiffSurfaceStable}
             onAddFiles={addFilesSurfaceStable}
+            onAddCanvas={addCanvasSurfaceStable}
             onAddPullRequest={addPullRequestSurfaceStable}
             onAddPullRequests={addPullRequestsSurfaceStable}
             onAddDevice={addDeviceSurfaceStable}
@@ -8661,6 +8674,7 @@ export default function ChatView(props: ChatViewProps) {
             terminalAvailable={activeProject !== null && canOperateTerminal}
             diffAvailable={isServerThread && isGitRepo}
             filesAvailable={activeProject !== null}
+            canvasAvailable={activeProject !== null && Boolean(activeWorkspaceRoot)}
             pullRequestAvailable={pullRequestSurfaceAvailable}
             pullRequestsAvailable={pullRequestsSurfaceAvailable}
             deviceAvailable={activeThreadRef !== null}
