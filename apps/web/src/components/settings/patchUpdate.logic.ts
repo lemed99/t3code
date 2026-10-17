@@ -29,8 +29,14 @@ export function patchUpdateView(state: DesktopPatchUpdateState): {
       label: "Update",
     };
   }
+  // The installer checks the branch itself (over git) and stops when
+  // nothing is new, so a failed check never blocks an update.
   if (state.checkError) {
-    return { description: `${state.checkError} ${installedText}`, action: "check", label: "Check" };
+    return {
+      description: `${state.checkError} ${installedText} Update checks with git instead.`,
+      action: "update",
+      label: "Update",
+    };
   }
   return {
     description:

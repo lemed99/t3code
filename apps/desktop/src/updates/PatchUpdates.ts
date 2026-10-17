@@ -147,7 +147,14 @@ export const make = Effect.gen(function* () {
       .execute(
         HttpClientRequest.get(
           `https://api.github.com/repos/${from.owner}/t3code/commits/${encodeURIComponent(from.branch)}`,
-        ).pipe(HttpClientRequest.setHeader("accept", "application/vnd.github+json")),
+        ).pipe(
+          // GitHub refuses API requests that carry no User-Agent, and Node's
+          // HTTP client sends none of its own.
+          HttpClientRequest.setHeaders({
+            accept: "application/vnd.github+json",
+            "user-agent": "T3-Code-patch-updates",
+          }),
+        ),
       )
       .pipe(
         Effect.flatMap(HttpClientResponse.filterStatusOk),
@@ -157,14 +164,20 @@ export const make = Effect.gen(function* () {
           date: body.commit.committer?.date ?? null,
           summary: body.commit.message.split("\n", 1)[0] ?? "",
         })),
+        Effect.mapError((error) =>
+          "response" in error && error.response !== undefined
+            ? `GitHub answered ${error.response.status}`
+            : error._tag,
+        ),
         Effect.timeout("15 seconds"),
-        Effect.option,
+        Effect.result,
       );
-    if (latest._tag === "Some") {
-      yield* Ref.set(latestRef, latest.value);
+    if (latest._tag === "Success") {
+      yield* Ref.set(latestRef, latest.success);
       yield* Ref.set(checkErrorRef, null);
     } else {
-      yield* Ref.set(checkErrorRef, "Couldn't reach GitHub to check for a new version.");
+      const reason = typeof latest.failure === "string" ? latest.failure : "no answer";
+      yield* Ref.set(checkErrorRef, `Couldn't check GitHub for a new version (${reason}).`);
     }
     return yield* state;
   });

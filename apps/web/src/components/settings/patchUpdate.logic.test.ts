@@ -33,6 +33,15 @@ describe("patchUpdateView", () => {
     expect(patchUpdateView({ ...base, run: { ...run, phase: "ready" } }).action).toBe("restart");
   });
 
+  it("still offers an update when GitHub cannot be checked", () => {
+    expect(
+      patchUpdateView({
+        ...base,
+        checkError: "Couldn't check GitHub for a new version (GitHub answered 403).",
+      }),
+    ).toMatchObject({ action: "update", label: "Update" });
+  });
+
   it("lets a failed update be retried", () => {
     expect(
       patchUpdateView({
