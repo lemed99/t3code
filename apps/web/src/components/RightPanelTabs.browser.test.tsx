@@ -142,11 +142,13 @@ async function renderTabs(
         onAddPullRequests={noop}
         onAddDiff={noop}
         onAddFiles={noop}
+        onAddCanvas={() => undefined}
         onAddDevice={noop}
         browserAvailable
         terminalAvailable={false}
         diffAvailable={false}
         filesAvailable={false}
+        canvasAvailable={false}
         pullRequestAvailable={false}
         pullRequestsAvailable={false}
         deviceAvailable={false}
