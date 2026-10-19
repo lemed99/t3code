@@ -69,6 +69,9 @@ interface TrackedRenderer {
   readonly removeListeners: () => void;
 }
 
+// Lines the design canvas logs for diagnosis (apps/web/.../canvasRecorder.ts).
+const CANVAS_RECORDER_PREFIX = "[canvas-recorder] ";
+
 const nonnegative = (value: number): number | null =>
   Number.isFinite(value) && value >= 0 ? Math.round(value) : null;
 
@@ -93,6 +96,37 @@ const make = Effect.fn("DesktopRendererHistory.make")(function* () {
       ),
     ),
   );
+
+  // The main window's canvas readings and console errors, read when the
+  // canvas misbehaves on someone's machine.
+  const canvasLines = yield* Queue.sliding<string>(2048);
+  const canvasWriter = yield* makeRotatingLogFileWriter({
+    filePath: path.join(environment.logDir, "canvas-recorder.ndjson"),
+    maxBytes: 1024 * 1024,
+    maxFiles: 2,
+  }).pipe(Effect.orElseSucceed(() => ({ writeText: (_chunk: string) => Effect.void })));
+  yield* Effect.forever(
+    Queue.take(canvasLines).pipe(
+      Effect.flatMap((line) => canvasWriter.writeText(`${line}\n`).pipe(Effect.ignore)),
+    ),
+  ).pipe(Effect.forkScoped);
+  const onMainConsoleMessage = (
+    details: Electron.Event<Electron.WebContentsConsoleMessageEventParams>,
+  ) => {
+    const { message, level } = details;
+    if (message.startsWith(CANVAS_RECORDER_PREFIX)) {
+      Queue.offerUnsafe(canvasLines, message.slice(CANVAS_RECORDER_PREFIX.length));
+    } else if (level === "error") {
+      Queue.offerUnsafe(
+        canvasLines,
+        JSON.stringify({
+          at: clock.currentTimeMillisUnsafe(),
+          event: "console-error",
+          message: message.slice(0, 2000),
+        }),
+      );
+    }
+  };
 
   const writeRecord = (record: RendererRecord) =>
     writer.writeText(`${JSON.stringify(record)}\n`).pipe(Effect.ignore);
@@ -223,6 +257,7 @@ const make = Effect.fn("DesktopRendererHistory.make")(function* () {
           webContents.removeListener("devtools-opened", onDevToolsOpened);
           webContents.removeListener("render-process-gone", onGone);
           webContents.removeListener("destroyed", onDestroyed);
+          webContents.removeListener("console-message", onMainConsoleMessage);
         },
       };
       active.set(webContents.id, renderer);
@@ -230,6 +265,8 @@ const make = Effect.fn("DesktopRendererHistory.make")(function* () {
       webContents.on("devtools-opened", onDevToolsOpened);
       webContents.on("render-process-gone", onGone);
       webContents.once("destroyed", onDestroyed);
+      if (boundedIdentity.surface === "main")
+        webContents.on("console-message", onMainConsoleMessage);
       record(renderer, "created");
     }).pipe(
       Effect.catchCauseIf(

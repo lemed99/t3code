@@ -64,6 +64,7 @@ import {
   holdPreviewPrewarm,
   usePreviewImage,
 } from "./previewLoader";
+import { describeElement, recordCanvas } from "./canvasRecorder";
 
 /** Room for the floating toolbars above the content when fitting. */
 const TOOLBAR_SPACE = 52;
@@ -340,6 +341,20 @@ function DesignBoardCanvas(
   // and zoom readout; screens decide what to show once it settles.
   const gestureRef = useRef(false);
   const livePausedRef = useRef(false);
+  // Back-to-back moves (each wheel tick is one to React Flow) are recorded as
+  // one gesture, written once the canvas has been still for a moment.
+  const gestureStatsRef = useRef({
+    startedAt: 0,
+    moves: 0,
+    longFrames: 0,
+    lastFrameAt: 0,
+    parts: 0,
+    pausedParts: 0,
+    fromZoom: 0,
+    source: "",
+    target: "",
+  });
+  const gestureFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flowViewportRef = useRef<HTMLElement | null>(null);
   const paintRequest = useRef(0);
   const paintView = useCallback(() => {
@@ -414,9 +429,31 @@ function DesignBoardCanvas(
       // Moves the board makes itself (fit, zoom buttons) arrive without an event.
       if (event === null) return;
       autoFitRef.current = false;
+      // React Flow starts a wheel gesture again on every tick until it ends.
+      const continuing = gestureRef.current;
       gestureRef.current = true;
       holdPreviewPrewarm(true);
-      if (liveKeysRef.current.size <= LIVE_GESTURE_MAX_PAGES) return;
+      const keepLive = liveKeysRef.current.size <= LIVE_GESTURE_MAX_PAGES;
+      const stats = gestureStatsRef.current;
+      if (gestureFlushTimer.current !== null) {
+        clearTimeout(gestureFlushTimer.current);
+        gestureFlushTimer.current = null;
+      } else if (!continuing) {
+        Object.assign(stats, {
+          startedAt: performance.now(),
+          moves: 0,
+          longFrames: 0,
+          parts: 0,
+          pausedParts: 0,
+          fromZoom: viewRef.current?.zoom ?? 0,
+          source: event.type,
+          target: describeElement(event.target),
+        });
+      }
+      stats.lastFrameAt = performance.now();
+      stats.parts += 1;
+      if (!keepLive) stats.pausedParts += 1;
+      if (keepLive) return;
       // Moving as one GPU layer for the length of the gesture.
       flowViewportRef.current ??=
         viewportRef.current?.querySelector(".react-flow__viewport") ?? null;
@@ -429,6 +466,11 @@ function DesignBoardCanvas(
   const onMove = useCallback(
     (_event: MouseEvent | TouchEvent | null, viewport: Viewport) => {
       viewRef.current = viewport;
+      const stats = gestureStatsRef.current;
+      stats.moves += 1;
+      const now = performance.now();
+      if (now - stats.lastFrameAt > 100) stats.longFrames += 1;
+      stats.lastFrameAt = now;
       // Trackpads send several events per frame; draw once per frame.
       if (!paintRequest.current) paintRequest.current = requestAnimationFrame(paintView);
     },
@@ -438,6 +480,28 @@ function DesignBoardCanvas(
     (_event: MouseEvent | TouchEvent | null, viewport: Viewport) => {
       viewRef.current = viewport;
       cancelAnimationFrame(paintRequest.current);
+      if (gestureRef.current) {
+        if (gestureFlushTimer.current !== null) clearTimeout(gestureFlushTimer.current);
+        gestureFlushTimer.current = setTimeout(() => {
+          gestureFlushTimer.current = null;
+          const stats = gestureStatsRef.current;
+          const view = viewRef.current;
+          recordCanvas("gesture", {
+            source: stats.source,
+            startedOn: stats.target,
+            fromZoom: stats.fromZoom,
+            toZoom: view?.zoom,
+            x: view && Math.round(view.x),
+            y: view && Math.round(view.y),
+            parts: stats.parts,
+            partsWithPagesPaused: stats.pausedParts,
+            moves: stats.moves,
+            ms: Math.round(performance.now() - stats.startedAt),
+            gapsOver100ms: stats.longFrames,
+            livePages: liveKeysRef.current.size,
+          });
+        }, 400);
+      }
       paintView();
       settleView();
     },
@@ -446,11 +510,131 @@ function DesignBoardCanvas(
   useEffect(
     () => () => {
       cancelAnimationFrame(paintRequest.current);
+      if (gestureFlushTimer.current !== null) clearTimeout(gestureFlushTimer.current);
       if (liveRevealTimer.current !== null) clearTimeout(liveRevealTimer.current);
       if (gestureRef.current) holdPreviewPrewarm(false);
     },
     [],
   );
+
+  // Readings for logs/canvas-recorder.ndjson: input that reaches the canvas
+  // (and what was under the cursor), each live page's state once the view
+  // settles, and errors while the canvas is open.
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport) return;
+    recordCanvas("board-open", {
+      page: page?.name,
+      frames: layout.frames.length,
+      devicePixelRatio: window.devicePixelRatio,
+    });
+    const batch = {
+      wheels: 0,
+      pinches: 0,
+      deltaY: 0,
+      events: [] as Array<WheelEvent>,
+      targets: new Set<string>(),
+    };
+    let movesAtBatchStart = gestureStatsRef.current.moves;
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let pointer = { x: 0, y: 0 };
+    const flush = () => {
+      flushTimer = null;
+      const under = document.elementFromPoint(pointer.x, pointer.y);
+      recordCanvas("input", {
+        wheels: batch.wheels,
+        pinches: batch.pinches,
+        deltaY: Math.round(batch.deltaY),
+        // Read after dispatch: whether anything (the canvas, a page) took it.
+        defaultPrevented: batch.events.filter((event) => event.defaultPrevented).length,
+        targets: [...batch.targets],
+        underCursor: describeElement(under),
+        canvasMoved: gestureStatsRef.current.moves !== movesAtBatchStart,
+        zoom: viewRef.current?.zoom,
+        appZoom: window.visualViewport?.scale,
+      });
+      batch.wheels = 0;
+      batch.pinches = 0;
+      batch.deltaY = 0;
+      batch.events = [];
+      batch.targets.clear();
+      movesAtBatchStart = gestureStatsRef.current.moves;
+    };
+    const insideCanvas = (event: MouseEvent) => {
+      const rect = viewport.getBoundingClientRect();
+      return (
+        event.clientX >= rect.left &&
+        event.clientX <= rect.right &&
+        event.clientY >= rect.top &&
+        event.clientY <= rect.bottom
+      );
+    };
+    // Capturing: the canvas stops wheel events from bubbling any further.
+    const onWheel = (event: WheelEvent) => {
+      if (!insideCanvas(event)) return;
+      pointer = { x: event.clientX, y: event.clientY };
+      batch.wheels += 1;
+      if (event.ctrlKey) batch.pinches += 1;
+      batch.deltaY += event.deltaY;
+      if (batch.events.length < 200) batch.events.push(event);
+      if (batch.targets.size < 4) batch.targets.add(describeElement(event.target));
+      flushTimer ??= setTimeout(flush, 300);
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!insideCanvas(event)) return;
+      recordCanvas("pointer-down", {
+        button: event.button,
+        target: describeElement(event.target),
+        detail: event.detail,
+      });
+    };
+    const onError = (event: ErrorEvent) =>
+      recordCanvas("error", { message: event.message, source: event.filename, line: event.lineno });
+    const onRejection = (event: PromiseRejectionEvent) =>
+      recordCanvas("error", { message: String(event.reason) });
+    window.addEventListener("wheel", onWheel, { capture: true, passive: true });
+    window.addEventListener("pointerdown", onPointerDown, true);
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      if (flushTimer !== null) clearTimeout(flushTimer);
+      window.removeEventListener("wheel", onWheel, true);
+      window.removeEventListener("pointerdown", onPointerDown, true);
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+      recordCanvas("board-close");
+    };
+  }, [page, layout.frames.length]);
+  useEffect(() => {
+    recordCanvas("interactive-screen", { key: liveKey });
+  }, [liveKey]);
+  useEffect(() => {
+    if (liveKeys.size === 0) return;
+    // After pages have had a moment to load and reveal.
+    const timer = setTimeout(() => {
+      const view = viewRef.current;
+      const size = viewportSizeRef.current;
+      recordCanvas("settled", {
+        zoom: view?.zoom,
+        x: view && Math.round(view.x),
+        y: view && Math.round(view.y),
+        canvas: size,
+        appZoom: window.visualViewport?.scale,
+        pages: [...(viewportRef.current?.querySelectorAll("iframe") ?? [])].map((frame) => {
+          const rect = frame.getBoundingClientRect();
+          const style = getComputedStyle(frame);
+          return {
+            key: frame.closest("[data-frame-key]")?.getAttribute("data-frame-key"),
+            opacity: style.opacity,
+            inlineOpacity: frame.style.opacity,
+            pointerEvents: style.pointerEvents,
+            rect: [rect.left, rect.top, rect.width, rect.height].map(Math.round),
+          };
+        }),
+      });
+    }, 1500);
+    return () => clearTimeout(timer);
+  }, [liveKeys]);
 
   // Labels sit above the board, so scrolls, pinches and drags that start on
   // one would stop there. They go on to the board as if made on it; the
@@ -1009,6 +1193,21 @@ const DesignFrameView = memo(function DesignFrameView(props: {
     return () => clearTimeout(timer);
   }, [drawnPage]);
   const pageShown = props.mounted && src !== null && loadedPage === src.page;
+  const pageMounted = props.mounted && src !== null;
+  const wasMounted = useRef(false);
+  useEffect(() => {
+    if (pageMounted === wasMounted.current) return;
+    wasMounted.current = pageMounted;
+    recordCanvas(pageMounted ? "page-mounted" : "page-unmounted", { key: frame.key });
+  }, [pageMounted, frame.key]);
+  useEffect(() => {
+    if (pageShown) recordCanvas("page-shown", { key: frame.key });
+  }, [pageShown, frame.key]);
+  useEffect(() => {
+    if (previewUrl !== null && overview === null) {
+      recordCanvas("preview-failed", { key: frame.key, attempt: previewAttempt });
+    }
+  }, [previewUrl, overview, frame.key, previewAttempt]);
 
   const accent = props.live || props.selected;
   return (
@@ -1069,7 +1268,10 @@ const DesignFrameView = memo(function DesignFrameView(props: {
               !pageShown && "opacity-1",
               !props.live && "pointer-events-none",
             )}
-            onLoad={() => setDrawnPage(src.page)}
+            onLoad={() => {
+              recordCanvas("page-load", { key: frame.key });
+              setDrawnPage(src.page);
+            }}
           />
         ) : null}
       </div>
