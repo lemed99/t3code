@@ -82,6 +82,11 @@ const GRID_TILE = 24;
 const LIVE_STEP_MS = 120;
 const LIVE_DRAWING_OPACITY = "0.01";
 const LIVE_REVEAL_MS = 250;
+/**
+ * Up to this many live pages keep running through a gesture, redrawn sharp at
+ * every step. More than that and redrawing them stutters, so previews stand in.
+ */
+const LIVE_GESTURE_MAX_PAGES = 3;
 
 const viewportSize = (viewport: HTMLElement | null) => ({
   width: viewport?.clientWidth ?? 800,
@@ -305,11 +310,12 @@ function DesignBoardCanvas(
     [],
   );
 
-  // Live pages go transparent during a gesture, so a zoom never re-rasters
-  // them (each is a separate process) and their preview shows instead. Coming
-  // back they are drawn barely visible first: a transparent page skips
-  // painting the frames nested in it, and showing it at once would flash it
-  // with those frames empty. The preview under it is the same picture.
+  // With more than a few live pages, they go transparent during a gesture, so
+  // a zoom never re-rasters them (each is a separate process) and their
+  // preview shows instead. Coming back they are drawn barely visible first: a
+  // transparent page skips painting the frames nested in it, and showing it at
+  // once would flash it with those frames empty. The preview under it is the
+  // same picture.
   const liveRevealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const setLivePagesPaused = useCallback((paused: boolean) => {
     const setOpacity = (opacity: string) => {
@@ -333,6 +339,7 @@ function DesignBoardCanvas(
   // A gesture only moves React Flow's viewport and repaints the labels, grid
   // and zoom readout; screens decide what to show once it settles.
   const gestureRef = useRef(false);
+  const livePausedRef = useRef(false);
   const flowViewportRef = useRef<HTMLElement | null>(null);
   const paintRequest = useRef(0);
   const paintView = useCallback(() => {
@@ -386,7 +393,10 @@ function DesignBoardCanvas(
       // A promoted layer keeps the resolution it was drawn at, so a zoom
       // leaves it blurry; dropping the hint redraws it sharp at the new scale.
       if (flowViewportRef.current) flowViewportRef.current.style.willChange = "";
-      setLivePagesPaused(false);
+      if (livePausedRef.current) {
+        livePausedRef.current = false;
+        setLivePagesPaused(false);
+      }
       holdPreviewPrewarm(false);
     }
     setLabelZoom(view.zoom);
@@ -405,12 +415,14 @@ function DesignBoardCanvas(
       if (event === null) return;
       autoFitRef.current = false;
       gestureRef.current = true;
+      holdPreviewPrewarm(true);
+      if (liveKeysRef.current.size <= LIVE_GESTURE_MAX_PAGES) return;
       // Moving as one GPU layer for the length of the gesture.
       flowViewportRef.current ??=
         viewportRef.current?.querySelector(".react-flow__viewport") ?? null;
       if (flowViewportRef.current) flowViewportRef.current.style.willChange = "transform";
+      livePausedRef.current = true;
       setLivePagesPaused(true);
-      holdPreviewPrewarm(true);
     },
     [setLivePagesPaused],
   );
@@ -439,6 +451,33 @@ function DesignBoardCanvas(
     },
     [],
   );
+
+  // Labels sit above the board, so scrolls, pinches and drags that start on
+  // one would stop there. They go on to the board as if made on it; the
+  // label's own button and double-click still work.
+  useEffect(() => {
+    const labels = labelsRef.current;
+    if (!labels) return;
+    const forward = (event: WheelEvent | MouseEvent) => {
+      const pane = viewportRef.current?.querySelector(".react-flow__pane");
+      if (!pane) return;
+      if (event instanceof WheelEvent) {
+        // Otherwise a pinch zooms the whole app.
+        event.preventDefault();
+        pane.dispatchEvent(new WheelEvent(event.type, event));
+        return;
+      }
+      if (event.button !== 0 || (event.target as Element).closest("button")) return;
+      event.preventDefault();
+      pane.dispatchEvent(new MouseEvent(event.type, event));
+    };
+    labels.addEventListener("wheel", forward, { passive: false });
+    labels.addEventListener("mousedown", forward);
+    return () => {
+      labels.removeEventListener("wheel", forward);
+      labels.removeEventListener("mousedown", forward);
+    };
+  }, []);
 
   /** Shows `view` at once; React Flow reports it back through onMove. */
   const applyView = useCallback(
