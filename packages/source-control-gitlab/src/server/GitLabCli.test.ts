@@ -182,6 +182,55 @@ layer("GitLabCli.layer", (it) => {
     }),
   );
 
+  it("names the project from a pasted URL, and the host to ask", () => {
+    assert.deepStrictEqual(GitLabCli.gitLabProjectReference(" group/project "), {
+      hostname: null,
+      path: "group/project",
+    });
+    assert.deepStrictEqual(
+      GitLabCli.gitLabProjectReference("https://gitlab.com/exowpee-frontend/admin/"),
+      { hostname: "gitlab.com", path: "exowpee-frontend/admin" },
+    );
+    assert.deepStrictEqual(
+      GitLabCli.gitLabProjectReference("https://git.example.com/a/b/c/-/tree/main?ref=x"),
+      { hostname: "git.example.com", path: "a/b/c" },
+    );
+    assert.deepStrictEqual(GitLabCli.gitLabProjectReference("git@gitlab.com:group/project.git"), {
+      hostname: "gitlab.com",
+      path: "group/project",
+    });
+  });
+
+  it.effect("looks up a pasted project URL on that URL's host", () =>
+    Effect.gen(function* () {
+      mockedRun.mockReturnValueOnce(
+        Effect.succeed(
+          processOutput(
+            JSON.stringify({
+              path_with_namespace: "exowpee-frontend/admin",
+              web_url: "https://gitlab.com/exowpee-frontend/admin",
+              http_url_to_repo: "https://gitlab.com/exowpee-frontend/admin.git",
+              ssh_url_to_repo: "git@gitlab.com:exowpee-frontend/admin.git",
+            }),
+          ),
+        ),
+      );
+
+      const glab = yield* GitLabCli.GitLabCli;
+      yield* glab.getRepositoryCloneUrls({
+        cwd: "/repo",
+        repository: "https://gitlab.com/exowpee-frontend/admin/",
+      });
+
+      expect(mockedRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          command: "glab",
+          args: ["api", "--hostname", "gitlab.com", "projects/exowpee-frontend%2Fadmin"],
+        }),
+      );
+    }),
+  );
+
   it.effect("creates merge requests through the GitLab API without placing the body in argv", () =>
     Effect.gen(function* () {
       mockedRun.mockReturnValueOnce(Effect.succeed(processOutput("{}")));

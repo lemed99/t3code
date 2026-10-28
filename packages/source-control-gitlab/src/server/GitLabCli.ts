@@ -392,6 +392,39 @@ function toSummaryWithOptionalUpdatedAt(
   return Option.isSome(updatedAt) ? { ...summary, updatedAt } : summary;
 }
 
+/**
+ * A project as `glab api` names it, from what someone pasted: `group/project`,
+ * a project URL (any page under it), or a clone URL. A URL also says which
+ * GitLab host to ask, which may not be glab's default.
+ */
+export function gitLabProjectReference(input: string): {
+  readonly hostname: string | null;
+  readonly path: string;
+} {
+  const trimmed = input.trim();
+  const scp = /^[\w.-]+@([^:/]+):(.+)$/.exec(trimmed);
+  let hostname: string | null = null;
+  let path = trimmed;
+  if (scp) {
+    hostname = scp[1]!;
+    path = scp[2]!;
+  } else if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed);
+      hostname = url.host;
+      path = decodeURIComponent(url.pathname);
+    } catch {
+      // Not a URL after all; use it as a path.
+    }
+  }
+  path = path
+    // Pages under a project (`/-/tree/main`, `/-/merge_requests/1`).
+    .replace(/\/-(\/.*)?$/, "")
+    .replace(/^\/+|\/+$/g, "")
+    .replace(/\.git$/, "");
+  return { hostname, path };
+}
+
 function parseRepositoryPath(repository: string): {
   readonly namespacePath: string | null;
   readonly projectPath: string;
@@ -519,10 +552,15 @@ export const make = Effect.gen(function* () {
           ),
         ),
       ),
-    getRepositoryCloneUrls: (input) =>
-      execute({
+    getRepositoryCloneUrls: (input) => {
+      const project = gitLabProjectReference(input.repository);
+      return execute({
         cwd: input.cwd,
-        args: ["api", `projects/${encodeURIComponent(input.repository)}`],
+        args: [
+          "api",
+          ...(project.hostname === null ? [] : ["--hostname", project.hostname]),
+          `projects/${encodeURIComponent(project.path)}`,
+        ],
       }).pipe(
         Effect.map((result) => result.stdout.trim()),
         Effect.flatMap((raw) =>
@@ -540,7 +578,8 @@ export const make = Effect.gen(function* () {
           ),
         ),
         Effect.map(normalizeRepositoryCloneUrls),
-      ),
+      );
+    },
     createRepository: (input) => {
       const { namespacePath, projectPath } = parseRepositoryPath(input.repository);
       const namespaceId: Effect.Effect<number | null, GitLabCliError> = namespacePath
