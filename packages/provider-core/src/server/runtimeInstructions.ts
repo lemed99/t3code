@@ -8,9 +8,18 @@ When asked for something the user will look at, keep or share (a design, a docum
 - Web page or small app to browse and use (a site, a calculator, an interactive report): artifacts/<name>/index.html, self-contained or with its files beside it. It opens full size and scrolls like a page; it is not put on a canvas.
 - Document (plan, spec, brief, report, notes): artifacts/<name>/document.md in Markdown, starting with a # title.
 - Sheet (table, budget, tracker, list of records): artifacts/<name>/<name>.csv with a header row.
-A request that names Claude Design ("use Claude Design", "design it like in Claude Design") asks for a design artifact made here, in artifacts/, with the same care for layout, type and realistic content; it does not mean the claude.ai website or a skill. Canvases copied from Claude Design (a canvas.json with "boards" beside .dc.html screens and support.js) keep their format: change their .dc.html screens in place, and add a screen as a new .dc.html file with its entry in "boards" (page, x, y, w, h, title) placed beside the screens it belongs with.
+A request that names Claude Design ("use Claude Design", "design it like in Claude Design") asks for a design artifact. Without a <claude_design> section below, make it here in artifacts/ with the same care for layout, type and realistic content; do not look for the claude.ai website or a skill. Canvases copied from Claude Design (a canvas.json with "boards" beside .dc.html screens and support.js) keep their format: change their .dc.html screens in place, and add a screen as a new .dc.html file with its entry in "boards" (page, x, y, w, h, title) placed beside the screens it belongs with.
 Record each artifact in artifacts/index.json: {"<name>": {"title": "...", "updatedAt": "<ISO 8601 date>"}}, keeping the other entries. To change an artifact, edit its files in place and update updatedAt; for an alternative design, add screens beside the original. Use realistic content, check each screen renders at its size before finishing, and say which artifact you made or changed. Use html_render only for quick visual answers, not for artifacts.
 </artifacts>`;
+
+/**
+ * For Claude Code, whose Artifact tool reaches Claude Design on the user's
+ * claude.ai account (T3 Code turns that tool on; Claude Code leaves it off for
+ * apps). The local copy is what T3 Code's Artifacts panel shows.
+ */
+export const CLAUDE_DESIGN_INSTRUCTIONS = `<claude_design>
+Your Artifact tool publishes to the user's claude.ai account, and its Design type is Claude Design. When the user asks to use Claude Design, make or change the design with that type and follow the instructions it returns. Keep its files in the project as well, at artifacts/<name>/project/ (canvas.json, one .dc.html per artboard, and the support files they link to), and publish from those files, so the design shows in T3 Code's Artifacts panel as well as on claude.ai. Record it in artifacts/index.json and put its claude.ai URL in artifacts/<name>/SOURCE.md. To change it later, edit the local files and publish again to the same artifact. When the user asks to pull, sync or get the latest from Claude Design (after changing it on claude.ai), read the artifact's files with the Artifact tool and overwrite the copies in artifacts/<name>/project/. If the Artifact tool is missing or refuses (it needs a claude.ai login, not an API key), say so in one line and make the design locally as described in <artifacts>.
+</claude_design>`;
 
 /**
  * Shared runtime context; omit model and effort when the harness manages them dynamically.

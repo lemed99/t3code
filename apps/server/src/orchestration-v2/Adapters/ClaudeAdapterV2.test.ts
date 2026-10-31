@@ -762,6 +762,7 @@ describe("ClaudeAdapterV2 native protocol logging", () => {
     assert.equal(systemPrompt.type, "preset");
     assert.equal(systemPrompt.preset, "claude_code");
     assert.include(systemPrompt.append ?? "", "Use `delegate_task`");
+    assert.include(systemPrompt.append ?? "", "<claude_design>");
     const logged = ClaudeAdapterV2.loggedClaudeQueryOptions(options);
     assert.equal(logged.hasMcpServers, true);
     assert.notInclude(JSON.stringify(logged), "secret-claude-token");
@@ -1163,6 +1164,7 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
 ) {
   const executablePaths: Array<string | undefined> = [];
   const taskToolEnvironment: Array<string | undefined> = [];
+  const artifactEnvironment: Array<string | undefined> = [];
   const adapter = yield* ClaudeAdapterV2.createClaudeAdapterV2(
     {
       instanceId: ClaudeAdapterV2.CLAUDE_DEFAULT_INSTANCE_ID,
@@ -1184,6 +1186,7 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
         Effect.sync(() => {
           executablePaths.push(input.options.pathToClaudeCodeExecutable);
           taskToolEnvironment.push(input.options.env?.CLAUDE_CODE_ENABLE_TODO_TOOLS);
+          artifactEnvironment.push(input.options.env?.CLAUDE_CODE_ARTIFACT);
           return {
             messages: Stream.never,
             offer: () => Effect.void,
@@ -1223,7 +1226,30 @@ const captureSdkExecutablePaths = Effect.fn("captureSdkExecutablePaths")(functio
       attachments: [],
     }),
   );
-  return { executablePaths, taskToolEnvironment };
+  return { executablePaths, taskToolEnvironment, artifactEnvironment };
+});
+
+describe("ClaudeAdapterV2 Claude Design", () => {
+  it.effect.each([
+    { source: "by default", hostEnvironment: {}, expected: "1" },
+    {
+      source: "unless the user turned it off",
+      hostEnvironment: { CLAUDE_CODE_ARTIFACT: "0" },
+      expected: "0",
+    },
+  ])("turns on the Artifact tool $source", (testCase) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { artifactEnvironment } = yield* captureSdkExecutablePaths("claude");
+        assert.deepEqual(artifactEnvironment, [testCase.expected]);
+      }),
+    ).pipe(
+      Effect.provideService(HostProcess.Environment, testCase.hostEnvironment),
+      Effect.provide(
+        Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+      ),
+    ),
+  );
 });
 
 describe("ClaudeAdapterV2 executable path", () => {

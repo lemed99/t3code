@@ -143,7 +143,10 @@ import {
 import type { ManagedServerProvider } from "@t3tools/provider-core/server/snapshot";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import { T3_CODE_ORCHESTRATION_INSTRUCTIONS } from "@t3tools/provider-core/server/orchestrationInstructions";
-import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
+import {
+  buildRuntimeInstructions,
+  CLAUDE_DESIGN_INSTRUCTIONS,
+} from "@t3tools/provider-core/server/runtimeInstructions";
 import {
   mcpToolPresentation,
   normalizeMcpText,
@@ -1158,6 +1161,7 @@ export function makeClaudeQueryOptions(input: {
       preset: "claude_code" as const,
       append:
         buildRuntimeInstructions({ harness: "Claude Code" }) +
+        `\n\n${CLAUDE_DESIGN_INSTRUCTIONS}` +
         (input.mcpServers === undefined ? "" : T3_CODE_ORCHESTRATION_INSTRUCTIONS),
     },
     ...(Object.keys(extraArgs).length === 0 ? {} : { extraArgs }),
@@ -9150,7 +9154,12 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
     const serverConfig = yield* ServerConfig.ServerConfig;
     const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
     const baseEnvironment = yield* mergeProviderInstanceEnvironment(environment, hostEnvironment);
-    const claudeEnvironment = yield* makeClaudeEnvironment(config, baseEnvironment);
+    const claudeEnvironment = {
+      // Claude Code leaves its Artifact tool (Claude Design) off when an app
+      // runs it; on here, unless the user's environment says otherwise.
+      CLAUDE_CODE_ARTIFACT: "1",
+      ...(yield* makeClaudeEnvironment(config, baseEnvironment)),
+    };
     const path = yield* Path.Path;
     const crypto = yield* Crypto.Crypto;
     const binaryPath = yield* resolveClaudeSdkExecutablePath(

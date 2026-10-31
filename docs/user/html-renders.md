@@ -37,6 +37,13 @@ Canvases copied from Claude Design (a `canvas.json` beside `.dc.html` screens an
 **Project designs**. Use the reload button after changing files some other way. Artifacts are not
 available on mobile.
 
+In a Claude thread signed in with a claude.ai subscription, ask to "use Claude Design" and the
+agent designs in Claude Design on your claude.ai account, keeping a copy in `artifacts/` that
+shows on the canvas. After changing the design on claude.ai, ask the agent to pull the latest from
+Claude Design to update the copy. Other providers, and Claude signed in with an API key, make the
+design locally instead. To turn this off, set `CLAUDE_CODE_ARTIFACT=0` in the Claude provider's
+environment.
+
 ## MCP apps
 
 Some MCP servers return an interactive app with their tool results, following the [MCP Apps](https://github.com/modelcontextprotocol/ext-apps) standard. When an agent calls one of those tools, the app appears in the thread in place of the tool call, on web, desktop, and mobile. Codex supports this today, for any MCP server you have configured for it; other providers show these calls as ordinary tool calls.
