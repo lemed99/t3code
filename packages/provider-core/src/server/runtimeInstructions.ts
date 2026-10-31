@@ -8,6 +8,7 @@ When asked for something the user will look at, keep or share (a design, a docum
 - Web page or small app to browse and use (a site, a calculator, an interactive report): artifacts/<name>/index.html, self-contained or with its files beside it. It opens full size and scrolls like a page; it is not put on a canvas.
 - Document (plan, spec, brief, report, notes): artifacts/<name>/document.md in Markdown, starting with a # title.
 - Sheet (table, budget, tracker, list of records): artifacts/<name>/<name>.csv with a header row.
+A request that names Claude Design ("use Claude Design", "design it like in Claude Design") asks for a design artifact made here, in artifacts/, with the same care for layout, type and realistic content; it does not mean the claude.ai website or a skill. Canvases copied from Claude Design (a canvas.json with "boards" beside .dc.html screens and support.js) keep their format: change their .dc.html screens in place, and add a screen as a new .dc.html file with its entry in "boards" (page, x, y, w, h, title) placed beside the screens it belongs with.
 Record each artifact in artifacts/index.json: {"<name>": {"title": "...", "updatedAt": "<ISO 8601 date>"}}, keeping the other entries. To change an artifact, edit its files in place and update updatedAt; for an alternative design, add screens beside the original. Use realistic content, check each screen renders at its size before finishing, and say which artifact you made or changed. Use html_render only for quick visual answers, not for artifacts.
 </artifacts>`;
 
