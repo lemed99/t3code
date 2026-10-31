@@ -8,6 +8,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 
@@ -56,7 +57,8 @@ export function runFromStatus(json: string, processAlive: (pid: number) => boole
     return null;
   }
   if (typeof value !== "object" || value === null) return null;
-  const { phase, message, pid, at } = value as Record<string, unknown>;
+  const { phase, message, pid, at, version } = value as Record<string, unknown>;
+  const runVersion = typeof version === "string" && version.length > 0 ? version : null;
   if (typeof phase !== "string" || !PHASES.has(phase) || typeof message !== "string") return null;
   const finished = FINISHED.has(phase as Phase);
   const alive = typeof pid === "number" && processAlive(pid);
@@ -66,6 +68,7 @@ export function runFromStatus(json: string, processAlive: (pid: number) => boole
       message: "The last update stopped before it finished.",
       active: false,
       at: typeof at === "number" ? at : 0,
+      version: runVersion,
     };
   }
   return {
@@ -73,6 +76,7 @@ export function runFromStatus(json: string, processAlive: (pid: number) => boole
     message,
     active: !finished,
     at: typeof at === "number" ? at : 0,
+    version: runVersion,
   };
 }
 
@@ -94,6 +98,10 @@ const processAlive = (pid: number) => {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
 };
+
+const decodeStatusPid = Schema.decodeUnknownOption(
+  Schema.fromJsonString(Schema.Struct({ pid: Schema.Number })),
+);
 
 const LatestCommit = Schema.Struct({
   sha: Schema.String,
@@ -192,9 +200,32 @@ export const make = Effect.gen(function* () {
     return yield* state;
   });
 
+  const statusPath = path.join(base, "status.json");
+  /** The installer process named in the status file, if it is still running. */
+  const runningInstaller = Effect.gen(function* () {
+    const status = yield* readText(statusPath);
+    if (status === null) return null;
+    const pid = Option.getOrNull(decodeStatusPid(status))?.pid;
+    return pid !== undefined && processAlive(pid) ? pid : null;
+  });
+
   const start = Effect.gen(function* () {
     const current = yield* state;
-    if (!current.supported || current.run?.active) return current;
+    if (!current.supported) return current;
+    if (current.run?.active) {
+      // Only a finished build waiting for T3 Code to quit gives way, when a
+      // newer version is out: its installer stops and a new run builds that.
+      if (current.run.phase !== "ready") return current;
+      const waiting = yield* runningInstaller;
+      if (waiting !== null) {
+        yield* Effect.sync(() => process.kill(waiting, "SIGTERM")).pipe(Effect.ignore);
+        // Its exit removes the lock the next run would otherwise wait on.
+        for (let tries = 0; tries < 50 && processAlive(waiting); tries++) {
+          yield* Effect.sleep("100 millis");
+        }
+        if (processAlive(waiting)) return yield* state;
+      }
+    }
     const pid = yield* Effect.sync(() => {
       // Detached, so a build keeps going when T3 Code quits to install it.
       const child = NodeChildProcess.spawn(
@@ -211,7 +242,6 @@ export const make = Effect.gen(function* () {
       return child.pid;
     });
     if (pid !== undefined) {
-      const statusPath = path.join(base, "status.json");
       // A rename, as the installer does, so a reader never sees half a file.
       yield* fs
         .writeFileString(`${statusPath}.app`, startedStatus(pid, yield* Clock.currentTimeMillis))

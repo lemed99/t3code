@@ -3,7 +3,7 @@ import { useEffect, useState } from "react";
 
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { patchUpdateView } from "./patchUpdate.logic";
+import { type PatchUpdateAction, patchUpdateView } from "./patchUpdate.logic";
 import { SettingsRow } from "./settingsLayout";
 import { searchableSetting } from "./settingsSearch";
 
@@ -45,13 +45,13 @@ export function PatchUpdateSettingsRow() {
   if (!bridge || !state?.supported) return null;
   const view = patchUpdateView(state);
 
-  const act = () => {
-    if (pending || view.action === "none") return;
+  const act = (action: PatchUpdateAction) => {
+    if (pending || action === "none") return;
     setPending(true);
     const run =
-      view.action === "restart"
+      action === "restart"
         ? bridge.restartToInstall().then(() => state)
-        : view.action === "update"
+        : action === "update"
           ? bridge.start()
           : bridge.check();
     void run
@@ -73,14 +73,26 @@ export function PatchUpdateSettingsRow() {
       {...searchableSetting("patch-updates")}
       description={view.description}
       control={
-        <Button
-          size="sm"
-          variant="outline"
-          disabled={pending || view.action === "none"}
-          onClick={act}
-        >
-          {view.label}
-        </Button>
+        <div className="flex shrink-0 items-center gap-2">
+          {view.secondary ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              disabled={pending}
+              onClick={() => act(view.secondary!.action)}
+            >
+              {view.secondary.label}
+            </Button>
+          ) : null}
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={pending || view.action === "none"}
+            onClick={() => act(view.action)}
+          >
+            {view.label}
+          </Button>
+        </div>
       }
     />
   );

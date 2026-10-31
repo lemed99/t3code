@@ -9,12 +9,34 @@ export function patchUpdateView(state: DesktopPatchUpdateState): {
   readonly description: string;
   readonly action: PatchUpdateAction;
   readonly label: string;
+  /** A second button, beside the main one. */
+  readonly secondary?: { readonly action: PatchUpdateAction; readonly label: string };
 } {
   const run = state.run;
   if (run?.active) {
-    return run.phase === "ready"
-      ? { description: run.message, action: "restart", label: "Restart to Install" }
-      : { description: run.message, action: "none", label: "Updating…" };
+    if (run.phase !== "ready") {
+      return { description: run.message, action: "none", label: "Updating…" };
+    }
+    const staged = run.version ?? null;
+    const latest = state.latest;
+    // A build waits for a restart; the branch may have moved on meanwhile.
+    if (staged !== null && latest !== null && latest.version !== staged) {
+      return {
+        description: `Ready to install ${short(staged)}, but a newer version is out: ${latest.summary} (${short(latest.version)}).`,
+        action: "update",
+        label: "Build Newer Version",
+        secondary: { action: "restart", label: "Install Ready One" },
+      };
+    }
+    return {
+      description:
+        staged !== null && latest !== null
+          ? `${run.message} It is the latest (${short(staged)}).`
+          : run.message,
+      action: "restart",
+      label: "Restart to Install",
+      secondary: { action: "check", label: "Check for Updates" },
+    };
   }
   const installed = state.installedVersion;
   const latest = state.latest;

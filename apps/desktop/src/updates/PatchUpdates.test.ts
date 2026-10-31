@@ -32,6 +32,7 @@ describe("startedStatus", () => {
       message: "Checking for a new version",
       active: true,
       at: 5,
+      version: null,
     });
   });
 });
@@ -43,7 +44,7 @@ describe("runFromStatus", () => {
         status({ phase: "building", message: "Building", pid: 42, at: 5 }),
         (pid) => pid === 42,
       ),
-    ).toEqual({ phase: "building", message: "Building", active: true, at: 5 });
+    ).toEqual({ phase: "building", message: "Building", active: true, at: 5, version: null });
   });
 
   it("reports a run whose installer died mid-way as stopped", () => {
@@ -58,7 +59,7 @@ describe("runFromStatus", () => {
   it("keeps a finished run's result after its installer exits", () => {
     expect(
       runFromStatus(status({ phase: "installed", message: "Done", pid: 42, at: 5 }), () => false),
-    ).toEqual({ phase: "installed", message: "Done", active: false, at: 5 });
+    ).toEqual({ phase: "installed", message: "Done", active: false, at: 5, version: null });
   });
 
   it("ignores a status it cannot read", () => {

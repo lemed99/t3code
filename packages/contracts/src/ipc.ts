@@ -354,6 +354,8 @@ export const DesktopPatchUpdateStateSchema = Schema.Struct({
       message: Schema.String,
       active: Schema.Boolean,
       at: Schema.Number,
+      /** The commit this run builds, once the installer knows it. */
+      version: Schema.optionalKey(Schema.NullOr(Schema.String)),
     }),
   ),
 });

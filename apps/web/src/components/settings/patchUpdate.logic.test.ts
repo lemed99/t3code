@@ -33,6 +33,28 @@ describe("patchUpdateView", () => {
     expect(patchUpdateView({ ...base, run: { ...run, phase: "ready" } }).action).toBe("restart");
   });
 
+  it("lets a ready build be checked against the branch, and replaced by a newer one", () => {
+    const ready = {
+      phase: "ready" as const,
+      message: "Ready. It installs when you restart T3 Code.",
+      active: true,
+      at: 1,
+      version: "ccccccc3333",
+    };
+    expect(patchUpdateView({ ...base, run: ready })).toMatchObject({
+      action: "restart",
+      secondary: { action: "check" },
+    });
+    expect(
+      patchUpdateView({ ...base, run: ready, latest: { ...latest, version: ready.version } }),
+    ).toMatchObject({ action: "restart", secondary: { action: "check" } });
+    expect(patchUpdateView({ ...base, run: ready, latest })).toMatchObject({
+      action: "update",
+      label: "Build Newer Version",
+      secondary: { action: "restart" },
+    });
+  });
+
   it("still offers an update when GitHub cannot be checked", () => {
     expect(
       patchUpdateView({
