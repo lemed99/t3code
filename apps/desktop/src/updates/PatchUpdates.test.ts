@@ -4,7 +4,7 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it } from "vite-plus/test";
 
-import { installerSource, runFromStatus } from "./PatchUpdates.ts";
+import { installerSource, runFromStatus, startedStatus } from "./PatchUpdates.ts";
 
 const status = (value: Record<string, unknown>) => JSON.stringify(value);
 
@@ -22,6 +22,17 @@ describe("installerSource", () => {
       "utf8",
     );
     expect(installerSource(shipped)).toEqual({ owner: "lemed99", branch: "auto-account-switch" });
+  });
+});
+
+describe("startedStatus", () => {
+  it("shows an update as running from the moment its installer starts", () => {
+    expect(runFromStatus(startedStatus(42, 5), (pid) => pid === 42)).toEqual({
+      phase: "checking",
+      message: "Checking for a new version",
+      active: true,
+      at: 5,
+    });
   });
 });
 

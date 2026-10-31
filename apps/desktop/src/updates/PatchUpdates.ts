@@ -2,6 +2,7 @@
 import * as NodeChildProcess from "node:child_process";
 
 import type { DesktopPatchUpdateState } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -73,6 +74,15 @@ export function runFromStatus(json: string, processAlive: (pid: number) => boole
     active: !finished,
     at: typeof at === "number" ? at : 0,
   };
+}
+
+/**
+ * The status written as the installer starts. Until the installer writes its
+ * own, the file still holds the previous run's outcome, which would show as
+ * if nothing had started.
+ */
+export function startedStatus(pid: number, at: number): string {
+  return JSON.stringify({ phase: "checking", message: "Checking for a new version", pid, at });
 }
 
 const processAlive = (pid: number) => {
@@ -185,7 +195,7 @@ export const make = Effect.gen(function* () {
   const start = Effect.gen(function* () {
     const current = yield* state;
     if (!current.supported || current.run?.active) return current;
-    yield* Effect.sync(() => {
+    const pid = yield* Effect.sync(() => {
       // Detached, so a build keeps going when T3 Code quits to install it.
       const child = NodeChildProcess.spawn(
         "/bin/bash",
@@ -198,7 +208,15 @@ export const make = Effect.gen(function* () {
         { detached: true, stdio: "ignore", env: process.env },
       );
       child.unref();
+      return child.pid;
     });
+    if (pid !== undefined) {
+      const statusPath = path.join(base, "status.json");
+      // A rename, as the installer does, so a reader never sees half a file.
+      yield* fs
+        .writeFileString(`${statusPath}.app`, startedStatus(pid, yield* Clock.currentTimeMillis))
+        .pipe(Effect.andThen(fs.rename(`${statusPath}.app`, statusPath)), Effect.ignore);
+    }
     return yield* state;
   });
 
