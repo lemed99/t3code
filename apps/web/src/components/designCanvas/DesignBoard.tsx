@@ -83,11 +83,6 @@ const GRID_TILE = 24;
 const LIVE_STEP_MS = 120;
 const LIVE_DRAWING_OPACITY = "0.01";
 const LIVE_REVEAL_MS = 250;
-/**
- * Up to this many live pages keep running through a gesture, redrawn sharp at
- * every step. More than that and redrawing them stutters, so previews stand in.
- */
-const LIVE_GESTURE_MAX_PAGES = 3;
 
 const viewportSize = (viewport: HTMLElement | null) => ({
   width: viewport?.clientWidth ?? 800,
@@ -311,10 +306,11 @@ function DesignBoardCanvas(
     [],
   );
 
-  // With more than a few live pages, they go transparent during a gesture, so
-  // a zoom never re-rasters them (each is a separate process) and their
-  // preview shows instead. Coming back they are drawn barely visible first: a
-  // transparent page skips painting the frames nested in it, and showing it at
+  // Live pages go transparent during a gesture and their previews show
+  // instead. Each is a separate process that does not redraw itself when the
+  // zoom changes under it, so one left showing through a zoom stays blank.
+  // Coming back they are drawn barely visible first: a transparent page skips
+  // painting the frames nested in it, and showing it at
   // once would flash it with those frames empty. The preview under it is the
   // same picture.
   const liveRevealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -433,7 +429,6 @@ function DesignBoardCanvas(
       const continuing = gestureRef.current;
       gestureRef.current = true;
       holdPreviewPrewarm(true);
-      const keepLive = liveKeysRef.current.size <= LIVE_GESTURE_MAX_PAGES;
       const stats = gestureStatsRef.current;
       if (gestureFlushTimer.current !== null) {
         clearTimeout(gestureFlushTimer.current);
@@ -452,8 +447,7 @@ function DesignBoardCanvas(
       }
       stats.lastFrameAt = performance.now();
       stats.parts += 1;
-      if (!keepLive) stats.pausedParts += 1;
-      if (keepLive) return;
+      if (liveKeysRef.current.size > 0) stats.pausedParts += 1;
       // Moving as one GPU layer for the length of the gesture.
       flowViewportRef.current ??=
         viewportRef.current?.querySelector(".react-flow__viewport") ?? null;
